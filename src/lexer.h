@@ -2,8 +2,7 @@
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
-
-#include <stdio.h>
+#include <stdlib.h>
 
 
 static const char *const punctuators[] = {
@@ -29,6 +28,7 @@ static const char *const punctuators[] = {
     "<",">",
     "!","&","|",".","%",
     "~","^","?",
+    "@" // Language extension
 };
 
 static const size_t punctuators_size = sizeof(punctuators) / sizeof(punctuators[0]);
@@ -43,6 +43,9 @@ static const char *const keywords[] = {
     "sizeof", "static", "struct", "switch",
     "typedef", "union", "unsigned", "void",
     "volatile", "while",
+    "_Alignas","_Alignof",
+    "_Atomic","_Generic","_Noreturn",
+    "_Static_assert","_Thread_local",
 
     // language extensions
     "pub", "import", "trait", "impl",
@@ -62,11 +65,27 @@ typedef enum {
   TK_CHAR,    // Charachter literals
   TK_NUM,     // Numeric literals
   TK_PP_NUM,  // Preprocessing numbers
-  TK_PLAIN,   // Plain text
+  TK_WHITE,   // Whitespace
+  TK_COMM,    // Comment
   TK_RAW,     // Raw embedded C code
   TK_EOF,     // End-of-file markers
   TK_ERR      // Unexpected token
 } TokenKind;
+
+static const char* TokenKind_name_map[] = {
+    "TK_IDENT",
+    "TK_PUNCT",
+    "TK_KEYWORD",
+    "TK_STR",
+    "TK_CHAR",
+    "TK_NUM",
+    "TK_PP_NUM",
+    "TK_WHITE",
+    "TK_COMM",
+    "TK_RAW",
+    "TK_EOF",
+    "TK_ERR"
+};
 
 // Lexing error hint
 typedef enum {
@@ -89,6 +108,7 @@ typedef struct Token {
     // Useful for helpful errors
     size_t row;
     size_t col;
+
 } Token;
 
 typedef struct {
@@ -142,6 +162,8 @@ static inline char lexer_advance(Lexer* lexer) {
 
     return c;
 }
+
+
 
 static inline Token lexer_token(
     Lexer *lexer,
@@ -223,7 +245,7 @@ static inline Token lexer_next(Lexer* lexer) {
                 lexer_advance(lexer);
             }
             #ifdef RETURN_PLAIN_TOKENS
-            return lexer_token(lexer, TK_PLAIN, start_wc, row_wc, col_wc);
+            return lexer_token(lexer, TK_WHITE, start_wc, row_wc, col_wc);
             #else
             continue;
             #endif
@@ -239,7 +261,7 @@ static inline Token lexer_next(Lexer* lexer) {
                 lexer_advance(lexer);
             }
             #ifdef RETURN_PLAIN_TOKENS
-            return lexer_token(lexer, TK_PLAIN, start_wc, row_wc, col_wc);
+            return lexer_token(lexer, TK_COMM, start_wc, row_wc, col_wc);
             #else
             continue;
             #endif
@@ -261,7 +283,7 @@ static inline Token lexer_next(Lexer* lexer) {
             lexer_advance(lexer);
 
             #ifdef RETURN_PLAIN_TOKENS
-            return lexer_token(lexer, TK_PLAIN, start_wc, row_wc, col_wc);
+            return lexer_token(lexer, TK_COMM, start_wc, row_wc, col_wc);
             #else
             continue;
             #endif
@@ -270,8 +292,6 @@ static inline Token lexer_next(Lexer* lexer) {
 
         break;
     }
-
-
 
     // remember where the token starts
     size_t start = lexer->pos;
@@ -287,10 +307,10 @@ static inline Token lexer_next(Lexer* lexer) {
 
     // raw c code wrapped in a #{ #} block
     if (lexer_matcher(lexer, "#{")) {
-        while (lexer_peek(lexer) != '\0' && !(lexer_matcher(lexer, "#}") && !lexer_matcher(lexer, "#}!") )) {
+        while (lexer_peek(lexer) != '\0' && !(lexer_matcher(lexer, "}#") && !lexer_matcher(lexer, "}#!") )) {
             lexer_advance(lexer);
         }
-        if (!lexer_matcher(lexer, "#}")) {
+        if (!lexer_matcher(lexer, "}#")) {
             return lexer_token_err(lexer, TK_ERR, OPEN_RAW, start, row, col);
         }
         // flush #} symbol
@@ -301,7 +321,7 @@ static inline Token lexer_next(Lexer* lexer) {
 
 
     // raw numeric literal (taken from chibicc)
-    if (isdigit((unsigned char) c) || (c == '.' && isdigit(lexer_peek_at(lexer, 1)))) {
+    if (isdigit((unsigned char) c) || (c == '.' && isdigit((unsigned char)lexer_peek_at(lexer, 1)))) {
         lexer_advance(lexer);
         for (;;) {
             char c = lexer_peek(lexer);
@@ -318,7 +338,24 @@ static inline Token lexer_next(Lexer* lexer) {
       return lexer_token(lexer, TK_PP_NUM, start, row, col);
     }
 
+    //
     // string and character literals
+    //
+
+    char n = lexer_peek_at(lexer, 1);
+    // include string prefix
+    if ((c == 'l' || c == 'L' || c == 'u' || c == 'U') && (n == '"' || n == '\'')) {
+        lexer_advance(lexer);
+    }
+
+    n = lexer_peek_at(lexer, 2);
+    if ((lexer_matcher(lexer, "u8") != 0) && (n == '"' || n == '\'')) {
+        lexer_advance(lexer); // u
+        lexer_advance(lexer); // 8
+    }
+
+    c = lexer_peek(lexer);
+
     if (c == '"' || c == '\'') {
         char quote = lexer_advance(lexer);
 
