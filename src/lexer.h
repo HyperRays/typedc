@@ -305,7 +305,7 @@ static inline Token lexer_next(Lexer* lexer) {
         return lexer_token(lexer, TK_EOF, start, row, col);
     }
 
-    // raw c code wrapped in a #{ #} block
+    // raw c code wrapped in a #{ }# block
     if (lexer_matcher(lexer, "#{")) {
         while (lexer_peek(lexer) != '\0' && !(lexer_matcher(lexer, "}#") && !lexer_matcher(lexer, "}#!") )) {
             lexer_advance(lexer);

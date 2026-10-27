@@ -3,10 +3,10 @@
 all: build/main
 
 build/main: build/main.o
-	clang $< -o $@
+	clang $< -o $@ -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g
 
-build/main.o: src/main.c src/lexer.h | build
-	clang -c $< -o $@
+build/main.o: src/main.c src/lexer.h src/parser.h | build
+	clang -c $< -o $@ -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g
 
 build:
 	mkdir -p $@
