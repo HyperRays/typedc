@@ -1,4 +1,3 @@
-#include <_abort.h>
 #include <stdio.h>
 //#define RETURN_PLAIN_TOKENS
 #include "parser.h"
@@ -7,10 +6,9 @@
 
 int main(void) {
     const char *source =
-        "{switch (a) { case a: {a;b;} case b: a} if(a) b}";
-
+        "a++;";
     Parser parser = parser_new(source);
-    Expr* expr = parse_expression(&parser);
+    Expr* expr = parse_statement(&parser);
     if(!expr) {
         printf("%s\n",ParseErr_map[parser_error(&parser)]);
         debug("Origin", parser.token);

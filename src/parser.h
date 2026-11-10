@@ -1,5 +1,4 @@
 #pragma once
-#include <_abort.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -17,6 +16,15 @@ typedef struct {
 // and left_bp >= right_bp right associative
 // https://en.cppreference.com/c/language/operator_precedence
 static const InfixOp opl[] = {
+    {"=", 4, 3},
+    {"+=", 4, 3},{"-=", 4, 3},
+    {"*=", 4, 3},{"/=", 4, 3},
+    {"%=", 4, 3},
+    {"<<=", 4, 3},{">>=", 4, 3},
+    {"&=", 4, 3},{"^=", 4, 3},{"!=", 4, 3},
+
+    {"?", 5, 5},
+
     {"||", 6, 7}, // 67
     {"&&", 8, 9},
 
@@ -51,7 +59,7 @@ static const int unary_size = sizeof(unary) / sizeof(char*);
 
 
 typedef enum {
-    PERR_OK,             // default no err
+    PERR_OK = 0,         // default no err
     PERR_UNEXPECTED,     // unexpected token
     PERR_REC_FAIL,       // stack machine recursion failed
     PERR_OPEN_CBRACK     // open curly bracket ('}')
@@ -67,20 +75,21 @@ static const char* ParseErr_map[] = {
 typedef struct {
     Lexer lexer;
     Token token;
-    ParseErr err[256];
+    ParseErr err[16];
 } ParserSnapshot;
 
 
-
+#define PERROR_MAX 16
 typedef struct Parser {
     Lexer lexer;
     Token token;
-    ParseErr err[256];
+    ParseErr err[PERROR_MAX];
 
-    ParserSnapshot snapshot[256]; int snapshot_idx;
+    ParserSnapshot snapshot[PERROR_MAX]; int snapshot_idx;
 } Parser;
 
 typedef enum {
+    E_ALL = 0, // TODO: Temporary value until I actually implement this properly
     E_IF,
     E_WHILE,
     E_DOWHILE,
@@ -88,15 +97,18 @@ typedef enum {
     E_COND,
     E_IDENT,
     E_UNARY,
-    E_INDEX,E_MEM,E_CALL,
+    E_INDEX, E_MEM, E_CALL, E_POSTFIX,
     E_SWITCH, E_CASE,
     E_BINARY,
+    E_TERNARY,
     E_BLOCK,
     E_ERR,
-    E_ALL, // TODO: Temporary value until I actually implement this properly
+    E_CONTINUE, E_BREAK,
+    E_RETURN
 } ExprKind;
 
 static const char* ExprKind_map[] = {
+    "E_ALL",
     "E_IF",
     "E_WHILE",
     "E_DOWHILE",
@@ -104,12 +116,14 @@ static const char* ExprKind_map[] = {
     "E_COND",
     "E_IDENT",
     "E_UNARY",
-    "E_INDEX","E_MEM","E_CALL",
+    "E_INDEX", "E_MEM", "E_CALL", "E_POSTFIX",
     "E_SWITCH", "E_CASE",
     "E_BINARY",
+    "E_TERNARY",
     "E_BLOCK",
     "E_ERR",
-    "E_ALL"
+    "E_CONTINUE", "E_BREAK",
+    "E_RETURN"
 };
 
 typedef struct Expr Expr;
@@ -151,7 +165,7 @@ static inline Parser parser_new(const char* source) {
 // TODO: Better error messages
 static inline int parser_error(Parser* p) {
     // return last parser error
-    for(size_t i = 0; i < 256; i++){
+    for(size_t i = 0; i < PERROR_MAX; i++){
         if(p->err[i] != PERR_OK)
             return p->err[i];
     }
@@ -160,7 +174,7 @@ static inline int parser_error(Parser* p) {
 
 static inline void parser_error_reset(Parser* p) {
     // return last parser error
-    for(size_t i = 0; i < 256; i++){
+    for(size_t i = 0; i < PERROR_MAX; i++){
             p->err[i] = PERR_OK;
     }
 }
@@ -168,14 +182,14 @@ static inline void parser_error_reset(Parser* p) {
 static inline int set_parser_error(Parser* p, ParseErr e) {
     assert(e && "PERR_OK is not an error!");
     size_t i;
-    for(i = 0; i < 256; i++){
+    for(i = 0; i < PERROR_MAX; i++){
         if(p->err[i] == PERR_OK){
             p->err[i] = e;
             break;
         }
     }
-    assert(i != 256 && "Cannot insert any more errors, error array full");
-    #if 0
+    assert(i != PERROR_MAX && "Cannot insert any more errors, error array full");
+    #if 1
         if(parser_error(p))
             abort();
     #endif
@@ -256,9 +270,9 @@ static inline void free_expr(Expr* expr) {
 }
 
 static inline void parser_push_snapshot(Parser* p) {
-    assert(p->snapshot_idx < 256);
+    assert(p->snapshot_idx < PERROR_MAX);
     p->snapshot[p->snapshot_idx] = (ParserSnapshot){p->lexer, p->token};
-    memcpy(&p->snapshot[p->snapshot_idx].err, &p->err, 256*sizeof(ParseErr));
+    memcpy(&p->snapshot[p->snapshot_idx].err, &p->err, PERROR_MAX*sizeof(ParseErr));
     p->snapshot_idx++;
 }
 
@@ -335,24 +349,26 @@ static inline int parser_expect(Parser* p, const char* e) {
 #define POP_SNAPSHOT    { .op = P_POP_SNAPSHOT }
 #define FSTACK          { .op = P_FSTACK }
 #define FCONTEXT        { .op = P_FCONTEXT }
+#define LEFT_COND       { .op = P_FCONTEXT }
+#define RIGHT_COND      { .op = P_FCONTEXT }
 #define EXPECT(s)       TOK(s,E_ALL), DISCARD
 
 typedef enum {
-    P_TOKEN,        // match a specific token
-    P_RECURSE,      // call a function pointer
-    P_PUSH,         // push current expr onto stack
-    P_POP,          // pop latest expr into context
-    P_LEFT,         // put expr into left of context
-    P_RIGHT,        // put expr into right of context
-    P_DISCARD,      // discard topmost stack expr
-    P_PUSH_SNAPSHOT,// push lexer snapshot to parser
-    P_POP_SNAPSHOT, // pop lexer snapshot to parser
-    P_BIF,          // branch if token
-    P_BIFN,         // branch if not token
-    P_ISTACK,       // interact with the stack directly
+    P_TOKEN,                // match a specific token
+    P_RECURSE,              // call a function pointer
+    P_PUSH,                 // push current expr onto stack
+    P_POP,                  // pop latest expr into context
+    P_LEFT,                 // put expr into left of context
+    P_RIGHT,                // put expr into right of context
+    P_DISCARD,              // discard topmost stack expr
+    P_PUSH_SNAPSHOT,        // push lexer snapshot to parser
+    P_POP_SNAPSHOT,         // pop lexer snapshot to parser
+    P_BIF,                  // branch if token
+    P_BIFN,                 // branch if not token
+    P_ISTACK,               // interact with the stack directly
 
-    P_FSTACK,       // debug print the stack
-    P_FCONTEXT,     // debug print the context
+    P_FSTACK,               // debug print the stack
+    P_FCONTEXT,             // debug print the context
 
     P_END
 } ParseOp;
@@ -434,14 +450,18 @@ static inline Expr* parse_rule(Parser* p, const ParseRule pr[]) {
             }
             case P_LEFT: {
                 assert(context && "Context empty");
-                assert(idx > 0);
-                context->left = stack[--idx];
+                if (idx > 0)
+                    context->left = stack[--idx];
+                else
+                    context->left = NULL;
                 break;
             }
             case P_RIGHT: {
                 assert(context && "Context empty");
-                assert(idx > 0);
-                context->right = stack[--idx];
+                if (idx > 0)
+                    context->right = stack[--idx];
+                else
+                    context->right = NULL;
                 break;
             }
             case P_DISCARD: {
@@ -503,11 +523,16 @@ static inline void  istack_while_cond(Expr* context, Expr* stack[256], size_t* i
 static inline Expr* parse_dowhile(Parser* p);
 static inline void  istack_dowhile_cond(Expr* context, Expr* stack[256], size_t* idx);
 
+static inline Expr* parse_return(Parser* p);
+static inline Expr* parse_break(Parser* p);
+static inline Expr* parse_continue(Parser* p);
+
 static inline Expr* parse_switchcase(Parser* p);
 
-static inline Expr* parse_expression(Parser* p);
 static inline Expr* parse_block(Parser* p);
 static inline Expr* parse_statement(Parser* p);
+
+static inline Expr* parse_expression(Parser* p);
 static inline Expr* parse_pratt(Parser* p, int min_bp);
 static inline Expr* parse_prefix(Parser* p);
 static inline Expr* parse_postfix(Parser* p);
@@ -545,11 +570,11 @@ static const ParseRule if_rule[] = {
     REC(parse_if_cond),
     EXPECT(")"),
 
-    REC(parse_expression),
+    REC(parse_statement),
 
     BIF("else"),
         EXPECT("else"),
-        REC(parse_expression),
+        REC(parse_statement),
         POP, // put into return context
     END,
     //FSTACK,
@@ -600,7 +625,7 @@ static const ParseRule for_rule[] = {
         REC(parse_for_cond),
     EXPECT(")"),
 
-    REC(parse_expression),
+    REC(parse_statement),
 
     ISTACK(istack_for_cond),
     END
@@ -636,7 +661,7 @@ static const ParseRule while_rule[] = {
     REC(parse_while_cond),
     EXPECT(")"),
 
-    REC(parse_expression),
+    REC(parse_statement),
 
     ISTACK(istack_while_cond),
     END
@@ -661,7 +686,7 @@ static inline void istack_dowhile_cond(Expr* context, Expr* stack[256], size_t* 
 static const ParseRule dowhile_rule[] = {
     TOK("do", E_DOWHILE),
     POP,
-    REC(parse_expression),
+    REC(parse_statement),
 
     // while (...)
     EXPECT("while"),
@@ -712,7 +737,7 @@ static const ParseRule case_rule[] = {
     POP,
     REC(parse_while_cond),
     EXPECT(":"),
-    REC(parse_expression),
+    REC(parse_statement),
     ISTACK(istack_case),
     END,
 };
@@ -745,9 +770,49 @@ static inline Expr* parse_switchcase(Parser* p){
 
 // END switch case statment
 
-static inline Expr* parse_expression(Parser* p) {
-    return parse_statement(p);
+// return
+
+static const ParseRule return_rule[] = {
+    TOK("return", E_RETURN),
+    POP,
+    BIFN(";"),
+        REC(parse_expression),
+        POP,
+    END,
+    LEFT,
+    EXPECT(";"),
+    END,
+};
+
+static inline Expr* parse_return(Parser* p) {
+    return parse_rule(p, return_rule);
 }
+
+// END return
+
+// break
+static const ParseRule break_rule[] = {
+    TOK("break", E_BREAK),
+    POP,
+    EXPECT(";"),
+    END
+};
+static inline Expr* parse_break(Parser* p) {
+    return parse_rule(p, break_rule);
+}
+// END break
+
+// continue
+static const ParseRule continue_rule[] = {
+    TOK("continue", E_CONTINUE),
+    POP,
+    EXPECT(";"),
+    END
+};
+static inline Expr* parse_continue(Parser* p){
+    return parse_rule(p, continue_rule);
+}
+// END continue
 
 static inline Expr* parse_statement(Parser* p) {
     Token tok = parser_peek(p);
@@ -770,8 +835,33 @@ static inline Expr* parse_statement(Parser* p) {
     if (token_is(tok, "switch"))
         return parse_switchcase(p);
 
-    //TODO: Rest of statements
-    return parse_pratt(p, 0);
+    if (token_is(tok, "break"))
+        return parse_break(p);
+
+    if (token_is(tok, "continue"))
+        return parse_continue(p);
+
+    if (token_is(tok, "return"))
+        return parse_return(p);
+
+    if (token_is(tok, ";")){
+        parser_advance(p);
+        return expr_new(E_ALL, tok, NULL, NULL);
+    }
+
+    Expr *expr = parse_expression(p);
+    if (!expr){
+        set_parser_error(p, PERR_REC_FAIL);
+        return NULL;
+    }
+    if (
+        parser_expect(p, ";")) {
+        free_expr(expr);
+        set_parser_error(p, PERR_UNEXPECTED);
+        return NULL;
+    }
+
+    return expr;
 }
 
 
@@ -821,7 +911,7 @@ static inline Expr* parse_block(Parser* p) {
 
         Expr* statement = parse_statement(p);
         if (!statement) {
-            if (!parser_error(p)) set_parser_error(p, PERR_REC_FAIL);
+            set_parser_error(p, PERR_REC_FAIL);
             free_expr(block);
             return NULL;
         }
@@ -831,7 +921,6 @@ static inline Expr* parse_block(Parser* p) {
             return NULL;
         }
 
-        if (token_is(parser_peek(p), ";")) parser_advance(p);
         if (token_is(parser_peek(p), "}")) break;
     }
 
@@ -841,6 +930,10 @@ static inline Expr* parse_block(Parser* p) {
         return NULL;
     }
     return block;
+}
+
+static inline Expr* parse_expression(Parser* p) {
+    return parse_pratt(p, 0);
 }
 
 static inline Expr* parse_pratt(Parser* p, int min_bp) {
@@ -860,6 +953,40 @@ static inline Expr* parse_pratt(Parser* p, int min_bp) {
 
         // Leave delimiters (including argument commas) for the caller.
         if (!op || op->left_bp < min_bp) break;
+
+        if (token_is(tok, "?")) {
+            parser_advance(p);                       // consume '?'
+
+            Expr* then_expr = parse_pratt(p, 0);     // full middle expression
+            if (parser_expect(p, ":")) {free_expr(left); free_expr(then_expr); return NULL;}
+            Expr* else_expr = parse_pratt(p, op->right_bp);
+
+            if (!then_expr || !else_expr) {
+                free_expr(left);
+                free_expr(then_expr);
+                free_expr(else_expr);
+                return NULL;
+            }
+
+            //same sort of definition as if / switch
+            Condition* if_cond = (Condition*)calloc(2,sizeof(Condition));
+            // if expr
+            if_cond[1] = (Condition){
+                .condition = left,
+                .block     = then_expr
+            };
+
+            // else case (default in switch)
+            if_cond[0] = (Condition){
+                .block = else_expr,
+            };
+
+            left             = expr_new(E_TERNARY, tok, NULL, NULL);
+            left->cases      = if_cond;
+            left->case_size  = 2;
+
+            continue;
+        }
 
         parser_advance(p);
         Expr* right = parse_pratt(p, op->right_bp);
@@ -887,9 +1014,17 @@ static inline Expr* parse_prefix(Parser* p) {
 static inline Expr* parse_postfix(Parser* p) {
     Expr* left = parse_primary(p);
     Token tok = parser_peek(p);
-    while (token_is(tok, "[") || token_is(tok, "(")) {
-        if (token_is(tok, "[")) {
+    while (1) {
+        Token tok = parser_peek(p);
 
+        // Existing operand followed by ++ or --.
+        if (token_is(tok, "++") || token_is(tok, "--")) {
+            parser_advance(p);
+            left = expr_new(E_POSTFIX, tok, left, NULL);
+            continue;
+        }
+
+        if (token_is(tok, "[")) {
             parser_advance(p);
             Expr* expr = parse_expression(p);
 
@@ -898,6 +1033,7 @@ static inline Expr* parse_postfix(Parser* p) {
                 assert(0 && "Unclosed bracket ']'");
             }
             left = expr_new(E_INDEX, tok, expr, left);
+            continue;
         }
 
         if (token_is(tok, "(")) {
@@ -920,10 +1056,11 @@ static inline Expr* parse_postfix(Parser* p) {
                 assert(0 && "Unclosed call bracket ')'");
             }
             left = expr_new(E_CALL, tok, expr, left);
+            continue;
         }
-        tok = parser_peek(p);
+
+        return left;
     }
-    return left;
 }
 
 static inline Expr* parse_primary(Parser* p) {
@@ -948,12 +1085,11 @@ static inline Expr* parse_primary(Parser* p) {
         case TK_PP_NUM:
         case TK_NUM:
         case TK_RAW:
-        case TK_KEYWORD:
         case TK_STR:
         case TK_CHAR:
             return expr_new(E_IDENT, tok, NULL, NULL);
         default:
-            assert(0 && "Unexpected token");
+            set_parser_error(p, PERR_UNEXPECTED);
             return NULL;
     }
 }
