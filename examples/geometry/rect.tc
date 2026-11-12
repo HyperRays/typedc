@@ -1,0 +1,16 @@
+// Part of the `geometry` namespace, see ../namespaces.tc
+
+pub typedef struct {
+    Point min;
+    Point max;
+} Rect;
+
+// static, so this is a different function than the `length` in point.tc
+// and a call to length in this file always means this one
+static int length(int from, int to) {
+    return abs_diff(from, to);
+}
+
+pub int area(Rect r) {
+    return length(r.min.x, r.max.x) * length(r.min.y, r.max.y);
+}

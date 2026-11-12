@@ -1,0 +1,49 @@
+// Part of the `geometry` namespace, see ../namespaces.tc
+//
+// A namespace is a directory. `import geometry;` loads every .tc file
+// directly inside of geometry/ and puts all of their declarations into one
+// shared table of names. So the files of a namespace see everything of each
+// other without importing anything, and the order of the files does not
+// matter (rect.tc uses Point and abs_diff from here).
+//
+// Since it is one table, a name can only be defined once per namespace.
+// A second abs_diff in rect.tc is the same error as defining it twice
+// in this file:
+//
+//   geometry/rect.tc:17:5: error: redefinition of function 'abs_diff'
+//   (already defined at geometry/point.tc:29)
+
+// `pub` has nothing to do with the files in here seeing each other. It only
+// decides what somebody who imports the namespace can reach as geometry::name
+pub typedef struct {
+    int x;
+    int y;
+} Point;
+
+pub Point point(int x, int y) {
+    Point p = {x, y};
+    return p;
+}
+
+// no pub, so this is visible in all files of geometry/ but not outside of it
+int abs_diff(int a, int b) {
+    return a > b ? a - b : b - a;
+}
+
+// The exception to "once per namespace" is `static`. Like in c a static
+// function belongs to its file: it is looked up in its own file first and
+// is invisible to the other files of the namespace. rect.tc has its own
+// static `length` with a different signature and the two do not clash.
+// In the generated c code they get the file name in front, so this one
+// becomes point_length and the other one rect_length
+static int length(Point from, Point to) {
+    return abs_diff(from.x, to.x) + abs_diff(from.y, to.y);
+}
+
+// an impl block cannot be pub as a whole, each method is marked on its own
+impl Point {
+    // the distance when you can only walk along the axes
+    pub int distance(Self self, Self other) {
+        return length(self, other);
+    }
+}
