@@ -30,9 +30,7 @@ void greet<Choices C>(char* name){
 // raw c, meaning just regular c, which typed c cannot handle
 // such as macro definitions can be put inside #{}# blocks and this
 // block will be copied over to the generated c code 1:1
-#{
-#define SAY_WHAT 0
-}#
+#{#define SAY_WHAT 0}#
 
 int main(void) {
     greet<Choices::SAY_HI>("Bob");

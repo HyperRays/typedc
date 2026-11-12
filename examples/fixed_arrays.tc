@@ -36,7 +36,7 @@ Row<T, K> take<T, size_t N, size_t K>(Row<T, N> row) {
     return out;
 }
 
-enum { WIDTH = 3 };
+#{#define WIDTH 3}#
 
 int main(void) {
     Row<int, 2> a = {{1, 2}};
@@ -67,9 +67,7 @@ int main(void) {
 // typedef struct int_3_Row int_3_Row;
 // typedef struct int_5_Row int_5_Row;
 //
-// enum {
-//     WIDTH = 3,
-// };
+// #define WIDTH 3
 //
 // struct int_2_Row {
 //     int items[2];
