@@ -46,10 +46,10 @@ static const char *const keywords[] = {
     "_Alignas","_Alignof",
     "_Atomic","_Generic","_Noreturn",
     "_Static_assert","_Thread_local",
+    "_Bool","_Complex",
 
     // language extensions
-    "pub", "import", "trait", "impl",
-    "raw_c", "globals"
+    "pub", "import", "trait", "impl"
 };
 
 static const size_t keywords_size = sizeof(keywords) / sizeof(keywords[0]);
@@ -69,7 +69,10 @@ typedef enum {
   TK_COMM,    // Comment
   TK_RAW,     // Raw embedded C code
   TK_EOF,     // End-of-file markers
-  TK_ERR      // Unexpected token
+  TK_ERR,     // Unexpected token
+  TK_DOTOP,   // User-defined dotted operator (.name.)
+  TK_INCLUDE, // #include logical line
+  TK_DIRECTIVE // Any other preprocessor line (only legal in preprocessed headers)
 } TokenKind;
 
 static const char* TokenKind_name_map[] = {
@@ -84,7 +87,10 @@ static const char* TokenKind_name_map[] = {
     "TK_COMM",
     "TK_RAW",
     "TK_EOF",
-    "TK_ERR"
+    "TK_ERR",
+    "TK_DOTOP",
+    "TK_INCLUDE",
+    "TK_DIRECTIVE"
 };
 
 // Lexing error hint
@@ -108,6 +114,10 @@ typedef struct Token {
     // Useful for helpful errors
     size_t row;
     size_t col;
+
+    // Bytes of whitespace and comments skipped right before the token:
+    // they are the `lead` bytes ending at `start`
+    size_t lead;
 
 } Token;
 
@@ -231,7 +241,36 @@ static inline int token_is(Token token, const char *text) {
            memcmp(token.start, text, length) == 0;
 }
 
+// A '#' starts a directive only when nothing but blanks precede it on its line.
+static inline int lexer_at_line_start(Lexer* lexer) {
+    size_t i = lexer->pos;
+    while (i > 0) {
+        char c = lexer->source[i - 1];
+        if (c == '\n') return 1;
+        if (c != ' ' && c != '\t') return 0;
+        i--;
+    }
+    return 1;
+}
+
+static inline int lexer_is_space_or_comment(Lexer* lexer, size_t offset) {
+    char c = lexer_peek_at(lexer, offset);
+    if (isspace((unsigned char)c)) return 1;
+    char n = lexer_peek_at(lexer, offset + 1);
+    return c == '/' && (n == '/' || n == '*');
+}
+
+static inline Token lexer_scan(Lexer* lexer);
+
 static inline Token lexer_next(Lexer* lexer) {
+    const char* entry = lexer->source + lexer->pos;
+    Token token = lexer_scan(lexer);
+    token.lead = token.start >= entry ? (size_t)(token.start - entry) : 0;
+    return token;
+}
+
+static inline Token lexer_scan(Lexer* lexer) {
+    size_t entry_pos = lexer->pos;
 
     for (;;) {
         // remember where the token starts (for whitespace & comments too)
@@ -313,12 +352,49 @@ static inline Token lexer_next(Lexer* lexer) {
         if (!lexer_matcher(lexer, "}#")) {
             return lexer_token_err(lexer, TK_ERR, OPEN_RAW, start, row, col);
         }
-        // flush #} symbol
+        // flush }# symbol
         lexer_advance(lexer);
         lexer_advance(lexer);
         return lexer_token(lexer, TK_RAW, start, row, col);
     }
 
+
+    // preprocessor line: #include is its own token, everything else is a
+    // directive the parser rejects outside preprocessed headers
+    if (c == '#' && lexer_at_line_start(lexer)) {
+        size_t name = 1;
+        while (lexer_peek_at(lexer, name) == ' ' || lexer_peek_at(lexer, name) == '\t') name++;
+        int is_include = strncmp(lexer->source + lexer->pos + name, "include", 7) == 0 &&
+                         !isalnum((unsigned char)lexer_peek_at(lexer, name + 7)) &&
+                         lexer_peek_at(lexer, name + 7) != '_';
+        // the logical line ends at the first newline that is not spliced with a backslash
+        while (lexer_peek(lexer) != '\0' && lexer_peek(lexer) != '\n') {
+            if (lexer_peek(lexer) == '\\' && lexer_peek_at(lexer, 1) == '\n')
+                lexer_advance(lexer);
+            else if (lexer_peek(lexer) == '\\' && lexer_peek_at(lexer, 1) == '\r' &&
+                     lexer_peek_at(lexer, 2) == '\n') {
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+            }
+            lexer_advance(lexer);
+        }
+        return lexer_token(lexer, is_include ? TK_INCLUDE : TK_DIRECTIVE, start, row, col);
+    }
+
+    // dotted operator: whitespace, '.', identifier, '.', whitespace
+    if (c == '.' && (lexer->pos != entry_pos || entry_pos == 0)) {
+        char first = lexer_peek_at(lexer, 1);
+        if (isalpha((unsigned char)first) || first == '_') {
+            size_t n = 2;
+            while (isalnum((unsigned char)lexer_peek_at(lexer, n)) || lexer_peek_at(lexer, n) == '_')
+                n++;
+            if (lexer_peek_at(lexer, n) == '.' && lexer_is_space_or_comment(lexer, n + 1)) {
+                for (size_t i = 0; i <= n; i++)
+                    lexer_advance(lexer);
+                return lexer_token(lexer, TK_DOTOP, start, row, col);
+            }
+        }
+    }
 
     // raw numeric literal (taken from chibicc)
     if (isdigit((unsigned char) c) || (c == '.' && isdigit((unsigned char)lexer_peek_at(lexer, 1)))) {
