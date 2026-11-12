@@ -6,8 +6,7 @@ static void usage(FILE* out) {
     fputs(
         "Usage: typedc [options] <file" SOURCE_EXTENSION ">...\n"
         "\n"
-        "Translates Typed C into header-only C11. The given files form the root\n"
-        "namespace; `import a::b;` loads every " SOURCE_EXTENSION " file in <root>/a/b.\n"
+        "Translates Typed C into header-only C11.\n"
         "\n"
         "Options:\n"
         "  -o <file>          write the generated header to <file> (default: stdout)\n"

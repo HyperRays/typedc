@@ -58,21 +58,21 @@ static const size_t keywords_size = sizeof(keywords) / sizeof(keywords[0]);
 
 // Token
 typedef enum {
-  TK_IDENT,   // Identifiers
-  TK_PUNCT,   // Punctuators
-  TK_KEYWORD, // Keywords
-  TK_STR,     // String literals
-  TK_CHAR,    // Charachter literals
-  TK_NUM,     // Numeric literals
-  TK_PP_NUM,  // Preprocessing numbers
-  TK_WHITE,   // Whitespace
-  TK_COMM,    // Comment
-  TK_RAW,     // Raw embedded C code
-  TK_EOF,     // End-of-file markers
-  TK_ERR,     // Unexpected token
-  TK_DOTOP,   // User-defined dotted operator (.name.)
-  TK_INCLUDE, // #include logical line
-  TK_DIRECTIVE // Any other preprocessor line (only legal in preprocessed headers)
+  TK_IDENT,     // Identifiers
+  TK_PUNCT,     // Punctuators
+  TK_KEYWORD,   // Keywords
+  TK_STR,       // String literals
+  TK_CHAR,      // Charachter literals
+  TK_NUM,       // Numeric literals
+  TK_PP_NUM,    // Preprocessing numbers
+  TK_WHITE,     // Whitespace
+  TK_COMM,      // Comment
+  TK_RAW,       // Raw embedded C code
+  TK_EOF,       // End-of-file markers
+  TK_ERR,       // Unexpected token
+  TK_DOTOP,     // User-defined dotted operator (.name.)
+  TK_INCLUDE,   // #include logical line
+  TK_DIRECTIVE  // Any other preprocessor line (only legal in preprocessed headers)
 } TokenKind;
 
 static const char* TokenKind_name_map[] = {

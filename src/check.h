@@ -28,7 +28,7 @@ static Type* number_type(Token tok);
 // #line directives (--line-directives)
 // ---------------------------------------------------------------------------
 
-// What the C compiler reports for the following code: this source position
+// Which line the C compiler should reports for the given code
 static const char* line_at(SrcFile* f, Token tok) {
     if (!g_opt.lines || !f || !tok.row) return "";
     size_t row = tok.row;
@@ -346,7 +346,7 @@ static Entity* lookup_type_entity(Ctx* c, Expr* s) {
     return e;
 }
 
-static int check_bound(Ctx* c, Type* t, Expr* bound);
+static Impl* bound_impl(Ctx* c, Type* t, Expr* bound);
 
 // ---------------------------------------------------------------------------
 // Constant generic parameters
@@ -406,8 +406,8 @@ static Type* const_from_value(Type* base, long long value) {
 }
 
 // A constant argument becomes part of a type, so it must be a constant
-// expression: no objects, no calls, no side effects. What typedc cannot see
-// into (macros, sizeof, raw C) is accepted and left to the C compiler.
+// expression. What typedc cannot see into
+// (macros, sizeof, raw C) is accepted and left to the C compiler.
 static void const_require(Ctx* c, Expr* e, const char* pname) {
     switch (e->kind) {
         case E_IDENT: {
@@ -528,8 +528,10 @@ static _Noreturn void fail_specialization_chain(Ctx* c, Token at, const char* na
     Buf b = {0};
     for (int i = n - 1; i >= 0 && i >= n - 3; i--)
         buf_printf(&b, "%s -> ", chain[i]);
-    FAIL(c, at, "'%s' needs more than %d nested specializations of itself; each one requests another: %s...",
-         name, SPECIALIZATION_LIMIT, buf_str(&b));
+    FAIL(c, at,
+         "specializing '%s' exceeded nesting limit; "
+         "stopped after %d nested specializations",
+         name, SPECIALIZATION_LIMIT);
 }
 
 // Instantiate a generic typedef. With arguments that still mention a generic
@@ -562,7 +564,7 @@ static Type* gtypedef_inst(Ctx* c, Entity* e, Type** args, int nargs, Token at) 
     for (int i = 0; i < nargs; i++) {
         Expr* param = d->generics->blockstmt[i];
         for (size_t j = 0; j < param->blockstmt_size; j++)
-            if (!check_bound(&dc, args[i], param->blockstmt[j]))
+            if (!bound_impl(&dc, args[i], param->blockstmt[j]))
                 FAIL(c, at, "type '%s' does not implement trait '%.*s', required by parameter '%.*s' of '%s'",
                      type_show(args[i]), (int)param->blockstmt[j]->token.length, param->blockstmt[j]->token.start,
                      (int)param->name.length, param->name.start, e->name);
@@ -1193,7 +1195,7 @@ static int impl_bounds_hold(Impl* im, Type** vals) {
         if (!vals[i]) return 0;
         Expr* param = g->blockstmt[i];
         for (size_t j = 0; j < param->blockstmt_size; j++)
-            if (!check_bound(&c, vals[i], param->blockstmt[j])) return 0;
+            if (!bound_impl(&c, vals[i], param->blockstmt[j])) return 0;
     }
     return 1;
 }
@@ -1231,10 +1233,6 @@ static Impl* bound_impl(Ctx* c, Type* t, Expr* bound) {
         found = im;
     }
     return found;
-}
-
-static int check_bound(Ctx* c, Type* t, Expr* bound) {
-    return bound_impl(c, t, bound) != NULL;
 }
 
 // Is `im` what a trait bound in scope requires of the receiver type? Inside
@@ -1362,7 +1360,7 @@ static FuncInst* func_inst(Ctx* c, Func* f, Type** ivals, Type* self, Type** own
     for (int i = 0; i < nown; i++) {
         Expr* param = f->generics->blockstmt[i];
         for (size_t j = 0; j < param->blockstmt_size; j++)
-            if (!check_bound(&fc, own[i], param->blockstmt[j]))
+            if (!bound_impl(&fc, own[i], param->blockstmt[j]))
                 FAIL(c, at, "type '%s' does not implement trait '%.*s', required by parameter '%.*s' of '%s'",
                      type_show(own[i]), (int)param->blockstmt[j]->token.length, param->blockstmt[j]->token.start,
                      (int)param->name.length, param->name.start, f->name);
@@ -1447,9 +1445,7 @@ static Type** infer_generics(Ctx* c, Func* f, Type** ivals, Type* self, Val* arg
 // Expressions
 // ---------------------------------------------------------------------------
 
-static inline Val val(const char* s, Type* t) {
-    return (Val){s, t ? t : &g_unknown};
-}
+#define val(s, t) (Val){s, t ? t : &g_unknown}
 
 static Type* number_type(Token tok) {
     const char* s = tok.start;

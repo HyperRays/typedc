@@ -7,8 +7,7 @@
 #include <setjmp.h>
 #include "lexer.h"
 
-// The compiler is a short-lived process: memory is allocated and never freed.
-
+// The compiler is a short-lived process, just free memory on unwind
 static inline void* xalloc(size_t size) {
     void* p = calloc(1, size ? size : 1);
     if (!p) {
