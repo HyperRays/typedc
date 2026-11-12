@@ -25,10 +25,6 @@ static void usage(FILE* out) {
         "                     passed to that compiler; use the flags of your C build\n"
         "  -h, --help         show this help\n",
         out);
-#ifdef TYPEDC_EMBED_ESBMC
-    fputs("\n  typedc build --help  emit C, verify with embedded ESBMC, then compile\n"
-          "  typedc esbmc ...     run the embedded ESBMC command line\n", out);
-#endif
 }
 
 static int write_output(const char* path, Buf* text) {
@@ -45,7 +41,7 @@ static int write_output(const char* path, Buf* text) {
     return ok;
 }
 
-static int typedc_transpile(int argc, char** argv) {
+int main(int argc, char** argv) {
     const char* output = NULL;
     const char* api = NULL;
     const char* impl = NULL;
@@ -166,18 +162,4 @@ static int typedc_transpile(int argc, char** argv) {
         return write_output(output, &out.header) ? 0 : 1;
     fputs(lines_finish(buf_str(&out.header), "<stdout>"), stdout);
     return 0;
-}
-
-#ifdef TYPEDC_EMBED_ESBMC
-#include "pipeline.h"
-#endif
-
-int main(int argc, char** argv) {
-#ifdef TYPEDC_EMBED_ESBMC
-    if (argc > 1 && !strcmp(argv[1], "build"))
-        return pipeline_main(argc - 1, argv + 1, argv[0]);
-    if (argc > 1 && !strcmp(argv[1], "esbmc"))
-        return typedc_esbmc_main(argc - 1, (const char**)argv + 1);
-#endif
-    return typedc_transpile(argc, argv);
 }
