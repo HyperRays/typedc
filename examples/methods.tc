@@ -15,6 +15,15 @@ impl Counter {
     }
 }
 
+// every function in an impl block needs a receiver, and a method can only
+// be called through one (c.next()), there is no Counter::next(c).
+// Something without a receiver, like a constructor, is just a free
+// function as you would write it in c
+Counter counter(int step) {
+    Counter c = {0, step};
+    return c;
+}
+
 // the receiver is passed like any other c argument, so by value.
 // A method which should change the receiver has to be written for the
 // pointer type instead, here Self == Counter*
@@ -45,7 +54,7 @@ impl int {
 }
 
 int main(void) {
-    Counter c = {0, 5};
+    Counter c = counter(5);
 
     // methods are looked up on the exact type of the receiver, there is no
     // automatic & or *. So c.tick() is an error (Counter has no tick),
@@ -82,14 +91,20 @@ int main(void) {
 //     char second;
 // };
 //
+// static inline Counter counter(int step);
 // int main(void);
 // static inline int next(Counter self);
 // static inline void tick(Counter* self);
 // static inline int squared(int self);
 // static inline Pair flipped(Pair self);
 //
+// static inline Counter counter(int step) {
+//     Counter c = {0, step};
+//     return c;
+// }
+//
 // int main(void) {
-//     Counter c = {0, 5};
+//     Counter c = counter(5);
 //     tick(&c);
 //     Counter* p = &c;
 //     tick(p);
