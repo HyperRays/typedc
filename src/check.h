@@ -20,6 +20,7 @@ static void impl_prepare(Impl* im);
 static const char* type_decl(Type* t, const char* name, Type* define, int indent);
 static const char* raw_text(Token tok);
 static int const_eval(Ctx* c, Expr* e, long long* out);
+static int reflection_constant(Ctx* c, Expr* e, long long* out);
 static Type* number_type(Token tok);
 
 #define FAIL(c, tok, ...) fatal((c)->file->path, (tok), __VA_ARGS__)
@@ -453,6 +454,7 @@ static void const_require(Ctx* c, Expr* e, const char* pname) {
             break;
         }
         case E_CALL: {
+            if (reflection_constant(c, e, NULL)) return;
             // only something that can be a function-like macro
             Expr* callee = e->right;
             if (callee->kind == E_IDENT && callee->token.kind == TK_IDENT) {
@@ -467,6 +469,20 @@ static void const_require(Ctx* c, Expr* e, const char* pname) {
     FAIL(c, e->token, "the argument for constant parameter '%s' must be a compile-time constant", pname);
 }
 
+// A type argument may be parsed as a name before its declaration is known.
+static Expr* type_argument(Expr* arg) {
+    if (arg->kind >= E_TY_BASE && arg->kind <= E_TY_HOLE) return arg;
+    if ((arg->flags & F_PAREN) ||
+        !((arg->kind == E_IDENT && arg->token.kind == TK_IDENT) || arg->kind == E_PATH)) return NULL;
+    if (!arg->sema) {
+        Expr* name = expr_new(E_TY_NAME, arg->token, arg->generics, NULL);
+        if (arg->kind == E_IDENT) expr_push(name, expr_new(E_IDENT, arg->token, NULL, NULL));
+        for (size_t i = 0; i < arg->blockstmt_size; i++) expr_push(name, arg->blockstmt[i]);
+        arg->sema = name;
+    }
+    return (Expr*)arg->sema;
+}
+
 // Resolve one generic argument against the parameter it is passed for: a type
 // for a type parameter, a constant expression for a constant parameter.
 static Type* resolve_generic_arg(Ctx* c, SrcFile* decl_file, Expr* param, Expr* arg) {
@@ -474,19 +490,10 @@ static Type* resolve_generic_arg(Ctx* c, SrcFile* decl_file, Expr* param, Expr* 
     const char* pname = tok_str(param->name);
 
     if (!param->type) {
-        if (type_syntax) return resolve_type(c, arg);
-        // a name the parser could not classify yet (see parse_generic_arg)
-        int name_only = !(arg->flags & F_PAREN) &&
-                        ((arg->kind == E_IDENT && arg->token.kind == TK_IDENT) || arg->kind == E_PATH);
-        if (!name_only)
+        Expr* type = type_argument(arg);
+        if (!type)
             FAIL(c, arg->token, "generic parameter '%s' is a type, but a constant was given", pname);
-        if (!arg->sema) {
-            Expr* name = expr_new(E_TY_NAME, arg->token, arg->generics, NULL);
-            if (arg->kind == E_IDENT) expr_push(name, expr_new(E_IDENT, arg->token, NULL, NULL));
-            for (size_t i = 0; i < arg->blockstmt_size; i++) expr_push(name, arg->blockstmt[i]);
-            arg->sema = name;
-        }
-        return resolve_type(c, (Expr*)arg->sema);
+        return resolve_type(c, type);
     }
 
     Expr* e = arg;
@@ -1529,6 +1536,20 @@ static Val gen_enum_const(Ctx* c, Type* t, Token name) {
     FAIL(c, name, "enum '%s' has no constant '%s'", type_show(t), key);
 }
 
+static Type** resolve_func_args(Ctx* c, Func* f, Expr* targs, Token at) {
+    int n = generics_count(f->generics);
+    int given = generics_count(targs);
+    if (n && !targs)
+        FAIL(c, at, "generic function '%s' needs explicit type arguments when it is not called directly, as in '%s<...>'",
+             f->name, f->name);
+    if (given != n)
+        FAIL(c, at, "'%s' takes %d type argument(s), %d given", f->name, n, given);
+    Type** own = (Type**)xalloc((size_t)(n + 1) * sizeof(Type*));
+    for (int i = 0; i < n; i++)
+        own[i] = resolve_generic_arg(c, f->file, f->generics->blockstmt[i], targs->blockstmt[i]);
+    return own;
+}
+
 static Val gen_entity_ref(Ctx* c, Entity* e, Expr* at) {
     switch (e->kind) {
         case ENT_FUNC: {
@@ -1536,18 +1557,8 @@ static Val gen_entity_ref(Ctx* c, Entity* e, Expr* at) {
                 if (at->generics) FAIL(c, at->token, "'%s' is a C function and takes no type arguments", e->name);
                 return val(e->name, entity_type(e));
             }
-            Func* f = e->func;
-            int n = generics_count(f->generics);
-            int given = at->generics ? (int)at->generics->blockstmt_size : 0;
-            if (n && !at->generics)
-                FAIL(c, at->token, "generic function '%s' needs explicit type arguments when it is not called directly, as in '%s<...>'",
-                     e->name, e->name);
-            if (given != n)
-                FAIL(c, at->token, "'%s' takes %d type argument(s), %d given", e->name, n, given);
-            Type** own = (Type**)xalloc((size_t)(n + 1) * sizeof(Type*));
-            for (int i = 0; i < n; i++)
-                own[i] = resolve_generic_arg(c, f->file, f->generics->blockstmt[i], at->generics->blockstmt[i]);
-            FuncInst* fi = func_inst(c, f, NULL, NULL, own, at->token);
+            Type** own = resolve_func_args(c, e->func, at->generics, at->token);
+            FuncInst* fi = func_inst(c, e->func, NULL, NULL, own, at->token);
             return val(symbol_ref(fi->sym), fi->type);
         }
         case ENT_VAR:
@@ -1680,8 +1691,13 @@ static Val gen_operand(Ctx* c, Expr* e, Type* expected) {
 
 #define MAX_ARGS 128
 
+static int gen_reflection(Ctx* c, Expr* e, Type* expected, int initializer, Val* out);
+static int reflection_set_indent(int indent);
+
 static Val gen_call(Ctx* c, Expr* e, Type* expected) {
     Expr* callee = e->right;
+    Val reflected;
+    if (gen_reflection(c, e, expected, 0, &reflected)) return reflected;
     Expr* argv[MAX_ARGS];
     int argc = 0;
     for (Expr* a = e->left; a; a = a->right) {
@@ -1754,13 +1770,7 @@ static Val gen_call(Ctx* c, Expr* e, Type* expected) {
     Val args[MAX_ARGS];
     Type** own = NULL;
     FuncInst* fi = NULL;
-    if (targs) {
-        if ((int)targs->blockstmt_size != ngen)
-            FAIL(c, at, "'%s' takes %d type argument(s), %zu given", f->name, ngen, targs->blockstmt_size);
-        own = (Type**)xalloc((size_t)(ngen + 1) * sizeof(Type*));
-        for (int i = 0; i < ngen; i++)
-            own[i] = resolve_generic_arg(c, f->file, f->generics->blockstmt[i], targs->blockstmt[i]);
-    }
+    if (targs) own = resolve_func_args(c, f, targs, at);
     if (ngen == 0 || own) {
         // the signature is known: arguments are converted by C, and nested
         // generic calls can infer from the parameter types
@@ -1988,6 +1998,8 @@ static Val gen_expr(Ctx* c, Expr* e, Type* expected) {
 // An initializer. Braced lists pass the member / element types down so nested
 // generic calls can infer from them.
 static Val gen_init(Ctx* c, Expr* e, Type* expected) {
+    Val reflected;
+    if (gen_reflection(c, e, expected, 1, &reflected)) return reflected;
     if (e->kind != E_INIT_LIST) return gen_expr(c, e, expected);
 
     Type* t = expected ? type_canon(expected) : &g_unknown;
@@ -2089,7 +2101,11 @@ static void gen_local_decl(Ctx* c, Expr* g, Buf* out, int ind) {
             local_push(c, L_TYPEDEF, name, alias);
         }
         Val init = {0};
-        if (d->left) init = gen_init(c, d->left, t);
+        if (d->left) {
+            int outer = reflection_set_indent(ind);
+            init = gen_init(c, d->left, t);
+            reflection_set_indent(outer);
+        }
         if (!is_typedef) local_push(c, L_VAR, name, t);
 
         if (single) {
@@ -2372,6 +2388,8 @@ static int const_eval(Ctx* c, Expr* e, long long* out) {
             if (!r.enum_type || type_canon(r.enum_type)->kind != TY_ENUM) return 0;
             return enum_value(type_canon(r.enum_type), tok_str(r.constant), out);
         }
+        case E_CALL:
+            return reflection_constant(c, e, out);
         case E_UNARY: {
             if (e->token.kind != TK_PUNCT || !const_eval(c, e->left, &a)) return 0;
             if (token_is(e->token, "-")) *out = -a;

@@ -430,12 +430,14 @@ static inline const char* types_ident(Type** types, int count) {
     return buf_str(&b);
 }
 
-// Source-level spelling for diagnostics
+// Source-level spelling for diagnostics and reflection
 static inline void type_show_into(Buf* b, Type* t) {
     if (!t) { buf_puts(b, "<none>"); return; }
     if (t->kind != TY_PTR) {
         if (t->quals & Q_CONST) buf_puts(b, "const ");
         if (t->quals & Q_VOLATILE) buf_puts(b, "volatile ");
+        if (t->quals & Q_RESTRICT) buf_puts(b, "restrict ");
+        if (t->quals & Q_ATOMIC) buf_puts(b, "_Atomic ");
     }
     switch (t->kind) {
         case TY_UNKNOWN: buf_puts(b, "<unknown>"); break;
@@ -444,19 +446,30 @@ static inline void type_show_into(Buf* b, Type* t) {
             type_show_into(b, t->base);
             buf_putc(b, '*');
             if (t->quals & Q_CONST) buf_puts(b, " const");
+            if (t->quals & Q_VOLATILE) buf_puts(b, " volatile");
+            if (t->quals & Q_RESTRICT) buf_puts(b, " restrict");
+            if (t->quals & Q_ATOMIC) buf_puts(b, " _Atomic");
             break;
-        case TY_ARRAY:
-            type_show_into(b, t->base);
-            buf_printf(b, "[%s]", t->size ? "N" : "");
+        case TY_ARRAY: {
+            Type* element = t;
+            while (element->kind == TY_ARRAY) element = element->base;
+            type_show_into(b, element);
+            for (Type* array = t; array->kind == TY_ARRAY; array = array->base) {
+                if (array->has_size_value) buf_printf(b, "[%lld]", array->size_value);
+                else buf_printf(b, "[%s]", array->size ? array->size : "");
+            }
             break;
+        }
         case TY_FUNC:
             type_show_into(b, t->base);
             buf_putc(b, '(');
+            if (!t->nargs && t->voidparams) buf_puts(b, "void");
             for (int i = 0; i < t->nargs; i++) {
                 if (i) buf_puts(b, ", ");
                 type_show_into(b, t->args[i]);
             }
-            buf_puts(b, t->variadic ? ", ...)" : ")");
+            if (t->variadic) buf_puts(b, t->nargs ? ", ..." : "...");
+            buf_putc(b, ')');
             break;
         case TY_STRUCT: case TY_ENUM: case TY_ALIAS: case TY_APP: {
             Type* u = type_unq(t);

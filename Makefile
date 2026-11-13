@@ -5,7 +5,7 @@ all: build/main
 build/main: build/main.o
 	clang $< -o $@ -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g
 
-build/main.o: src/main.c src/lexer.h src/parser.h | build
+build/main.o: src/main.c $(wildcard src/*.h) | build
 	clang -c $< -o $@ -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g
 
 build:

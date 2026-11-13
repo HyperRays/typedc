@@ -167,6 +167,7 @@ static int env_lookup_generic(void* env, const Token* segments, int count, int m
 // ---------------------------------------------------------------------------
 
 static void module_load(Module* m);
+static Module* reflect_module(void);
 
 static inline Module* module_new(const char* name) {
     Module* m = (Module*)xalloc(sizeof(Module));
@@ -190,6 +191,8 @@ static inline Module* module_for_import(SrcFile* from, Expr* import) {
     }
     Module* m = (Module*)map_get(&g_module_by_name, buf_str(&name));
     if (m) return m;
+
+    if (strcmp(buf_str(&name), "builtin") == 0) return reflect_module();
 
     if (!is_directory(buf_str(&dir)))
         fatal(from->path, import->token, "cannot find namespace '%s': '%s' is not a directory",
@@ -223,7 +226,7 @@ static inline Module* module_for_import(SrcFile* from, Expr* import) {
 // First pass over a file: find what it imports, includes and declares as types,
 // so that every file can then be parsed in full regardless of order.
 static inline void file_prescan(SrcFile* f) {
-    f->source = read_file(f->path);
+    if (!f->source) f->source = read_file(f->path);
     if (!f->source) fatal(f->path, (Token){0}, "cannot read file");
 
     Parser p = parser_new(f->source);
