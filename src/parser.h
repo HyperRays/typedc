@@ -106,6 +106,7 @@ typedef struct Parser {
 
     const char* filename;       // for diagnostics
     int header_mode;            // input is preprocessed C: skip compiler noise, recover per declaration
+    int preprocessed;           // constant expression already expanded by the C preprocessor
     int prescan;                // declarations only: skip bodies, initializers and other expressions
     int strict_types;           // > 0: type names must be known (used while speculating)
     int switch_depth;           // > 0: inside a switch body
@@ -284,6 +285,8 @@ typedef struct Expr {
     struct Expr* type;      // type syntax, when the kind has one
     struct Expr* generics;  // E_LIST of generic parameters or type arguments
     void* sema;             // filled in by the compiler
+    Token source;           // original expression, before lowering or macro expansion
+    const char* expanded;   // cached preprocessing of source, independent of generic bindings
 
     // Comments and blank lines of the source, kept for the generated C.
     // Only items of a list (statements, members, declarations) carry them.
@@ -1542,6 +1545,7 @@ static inline Expr* parse_constant_expression(Parser* p) {
 }
 
 static inline Expr* parse_pratt(Parser* p, int min_bp) {
+    Token start = parser_peek(p);
     // Prefix and postfix expressions bind more tightly than any infix operator.
     Expr* left = parse_prefix(p);
     if (!left) return NULL;
@@ -1597,6 +1601,10 @@ static inline Expr* parse_pratt(Parser* p, int min_bp) {
         parser_advance(p);
         Expr* right = parse_pratt(p, op->right_bp);
         left = expr_new(E_BINARY, tok, left, right);
+    }
+    if (!p->preprocessed && !p->header_mode) {
+        left->source = start;
+        left->source.length = (size_t)(parser_peek(p).start - start.start);
     }
     return left;
 }
@@ -2031,7 +2039,13 @@ static inline Expr* parse_type_args(Parser* p) {
     Expr* args = expr_new(E_LIST, parser_peek(p), NULL, NULL);
     parser_expect(p, "<");
     for (;;) {
-        expr_push(args, parse_generic_arg(p));
+        Token start = parser_peek(p);
+        Expr* arg = parse_generic_arg(p);
+        if (!p->preprocessed && !p->header_mode) {
+            arg->source = start;
+            arg->source.length = (size_t)(parser_peek(p).start - start.start);
+        }
+        expr_push(args, arg);
         if (!token_punct(parser_peek(p), ",")) break;
         parser_advance(p);
     }

@@ -56,11 +56,11 @@ int main(void) {
 //
 // int main(void);
 // static inline void n0_greet(char* name);
-// static inline void _SAY_WHAT____0_____1___greet(char* name);
+// static inline void n1_greet(char* name);
 //
 // int main(void) {
 //     n0_greet("Bob");
-//     _SAY_WHAT____0_____1___greet(NULL);
+//     n1_greet(NULL);
 // }
 //
 // static inline void n0_greet(char* name) {
@@ -81,11 +81,11 @@ int main(void) {
 //     }
 // }
 //
-// static inline void _SAY_WHAT____0_____1___greet(char* name) {
+// static inline void n1_greet(char* name) {
 //     if (!name) {
 //         name = "World";
 //     }
-//     switch ((Choices)((SAY_WHAT ? SAY_HI : SAY_BYE))) {
+//     switch ((Choices)1) {
 //     case SAY_HI:
 //         {
 //             printf("Hi, %s\n", name);

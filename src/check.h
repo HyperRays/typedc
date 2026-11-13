@@ -18,7 +18,6 @@ static void struct_resolve(Type* t);
 static Type* entity_type(Entity* e);
 static void impl_prepare(Impl* im);
 static const char* type_decl(Type* t, const char* name, Type* define, int indent);
-static const char* raw_text(Token tok);
 static int const_eval(Ctx* c, Expr* e, long long* out);
 static int reflection_constant(Ctx* c, Expr* e, long long* out);
 static Type* number_type(Token tok);
@@ -38,14 +37,7 @@ static const char* line_at(SrcFile* f, Token tok) {
         for (size_t i = 2; i < tok.length && isspace((unsigned char)tok.start[i]); i++)
             if (tok.start[i] == '\n') row++;
     }
-    Buf b = {0};
-    buf_printf(&b, "#line %zu \"", row);
-    for (const char* p = f->path; *p; p++) {
-        if (*p == '"' || *p == '\\') buf_putc(&b, '\\');
-        buf_putc(&b, *p);
-    }
-    buf_puts(&b, "\"\n");
-    return buf_str(&b);
+    return source_line(f, row);
 }
 
 // ... and from here on the generated file again. The line number is only known
@@ -406,9 +398,50 @@ static Type* const_from_value(Type* base, long long value) {
     return k;
 }
 
+static Expr* const_preprocess(Ctx* c, Expr* e) {
+    if (!e->source.start) return e;
+    if (!e->expanded) e->expanded = preprocess_constant(c->file, e->source);
+    Parser* p = (Parser*)xalloc(sizeof(Parser));
+    *p = parser_new(e->expanded);
+    p->filename = c->file->path;
+    p->preprocessed = 1;
+    p->token.row += e->source.row - 1;
+    p->lexer.row += e->source.row - 1;
+    p->env = c->file;
+    p->lookup_type = env_lookup_type;
+    p->lookup_generic = env_lookup_generic;
+    p->lookup_dotop = env_lookup_dotop;
+
+    List bindings = {0}, locals = {0};
+    for (TEnv* t = c->tenv; t; t = t->next) list_push(&bindings, t);
+    for (size_t i = bindings.len; i-- > 0;) {
+        TEnv* t = (TEnv*)bindings.items[i];
+        parser_declare(p, t->param->name, !t->param->type);
+    }
+    if (c->self) parser_declare(p, token_synth("Self", TK_IDENT, e->source), 1);
+    for (Local* l = c->locals; l; l = l->next) list_push(&locals, l);
+    for (size_t i = locals.len; i-- > 0;) {
+        Local* l = (Local*)locals.items[i];
+        if (l->kind != L_TAG)
+            parser_declare(p, token_synth(l->name, TK_IDENT, e->source), l->kind == L_TYPEDEF);
+    }
+
+    jmp_buf attempt;
+    p->spec_jmp[p->spec_depth++] = &attempt;
+    if (setjmp(attempt) != 0) {
+        // C syntax outside Typed C's grammar stays opaque to constant evaluation.
+        Token raw = token_synth(xstrf("#{%s}#", e->expanded), TK_RAW, e->source);
+        return expr_new(E_RAW, raw, NULL, NULL);
+    }
+    Expr* expanded = parse_expression(p);
+    if (parser_peek(p).kind != TK_EOF)
+        parser_fail(p, p->token, "expected the end of the preprocessed expression");
+    return expanded;
+}
+
 // A constant argument becomes part of a type, so it must be a constant
-// expression. What typedc cannot see into
-// (macros, sizeof, raw C) is accepted and left to the C compiler.
+// expression. Expressions Typed C cannot evaluate, such as sizeof, are left
+// to the C compiler.
 static void const_require(Ctx* c, Expr* e, const char* pname) {
     switch (e->kind) {
         case E_IDENT: {
@@ -504,6 +537,7 @@ static Type* resolve_generic_arg(Ctx* c, SrcFile* decl_file, Expr* param, Expr* 
         if (!arg->sema) arg->sema = expr_new(E_IDENT, arg->blockstmt[0]->token, NULL, NULL);
         e = (Expr*)arg->sema;
     }
+    if (arg->source.start) e = const_preprocess(c, arg);
     Type* base = const_param_type(decl_file, param);
     // a constant parameter handed on as it is
     if (e->kind == E_IDENT && e->token.kind == TK_IDENT && !(e->flags & F_PAREN)) {
@@ -514,7 +548,7 @@ static Type* resolve_generic_arg(Ctx* c, SrcFile* decl_file, Expr* param, Expr* 
     Val v = gen_expr(c, e, base);
     long long value;
     if (const_eval(c, e, &value)) return const_from_value(base, value);
-    // not something typedc can evaluate (a macro, sizeof, ...): known by its spelling
+    // Expressions without a known value retain their expanded C spelling.
     Type* k = type_new(TY_CONST);
     k->base = base;
     k->name = v.s;
@@ -1500,29 +1534,6 @@ static inline int type_is_pointerish(Type* t) {
     return c->kind == TY_PTR || c->kind == TY_ARRAY;
 }
 
-static const char* raw_text(Token tok) {
-    // strip the delimiters and decode `}#!`, the escape for a literal `}#`
-    Buf raw = {0};
-    const char* s = tok.start + 2;
-    const char* end = tok.start + tok.length - 2;
-    while (s < end) {
-        if (end - s >= 3 && s[0] == '}' && s[1] == '#' && s[2] == '!') {
-            buf_puts(&raw, "}#");
-            s += 3;
-        } else {
-            buf_putc(&raw, *s++);
-        }
-    }
-    // surrounding blank space is layout, not content
-    const char* text = buf_str(&raw);
-    size_t len = strlen(text);
-    while (len && isspace((unsigned char)text[len - 1])) len--;
-    size_t start = 0;
-    while (start < len && isspace((unsigned char)text[start])) start++;
-    // keep the indentation of the first line if the block spans several
-    return xstrn(text + start, len - start);
-}
-
 static Val gen_enum_const(Ctx* c, Type* t, Token name) {
     Type* e = type_canon(t);
     if (e->kind != TY_ENUM)
@@ -2352,8 +2363,9 @@ static int enum_value(Type* t, const char* name, long long* out) {
 }
 
 // Evaluate an integer constant expression. Returns 0 for anything typedc does
-// not model (macros, sizeof, header constants, floating point).
+// not model (sizeof, header constants, floating point).
 static int const_eval(Ctx* c, Expr* e, long long* out) {
+    e = const_preprocess(c, e);
     long long a, b;
     switch (e->kind) {
         case E_IDENT: {

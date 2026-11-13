@@ -10,7 +10,7 @@
 #define SOURCE_EXTENSION ".tc"
 
 typedef struct {
-    const char* cc;         // C compiler used to preprocess headers
+    const char* cc;         // C compiler used for preprocessing
     List cpp_args;          // -I / -D / ... passed through to it
     const char* root;       // directory of the root namespace
     int lines;              // write #line directives pointing back at the source
@@ -74,6 +74,38 @@ static inline const char* shell_quote(const char* s) {
     }
     buf_putc(&b, '\'');
     return buf_str(&b);
+}
+
+static inline const char* source_line(SrcFile* f, size_t row) {
+    Buf b = {0};
+    buf_printf(&b, "#line %zu \"", row);
+    for (const char* p = f->path; *p; p++) {
+        if (*p == '"' || *p == '\\') buf_putc(&b, '\\');
+        buf_putc(&b, *p);
+    }
+    buf_puts(&b, "\"\n");
+    return buf_str(&b);
+}
+
+static const char* raw_text(Token tok) {
+    // strip the delimiters and decode `}#!`, the escape for a literal `}#`
+    Buf raw = {0};
+    const char* s = tok.start + 2;
+    const char* end = tok.start + tok.length - 2;
+    while (s < end) {
+        if (end - s >= 3 && s[0] == '}' && s[1] == '#' && s[2] == '!') {
+            buf_puts(&raw, "}#");
+            s += 3;
+        } else {
+            buf_putc(&raw, *s++);
+        }
+    }
+    const char* text = buf_str(&raw);
+    size_t len = strlen(text);
+    while (len && isspace((unsigned char)text[len - 1])) len--;
+    size_t start = 0;
+    while (start < len && isspace((unsigned char)text[start])) start++;
+    return xstrn(text + start, len - start);
 }
 
 static inline const char* token_name(Token tok, char* buffer, size_t size) {
@@ -696,7 +728,7 @@ static inline void file_parse(SrcFile* f) {
 }
 
 // ---------------------------------------------------------------------------
-// C header discovery
+// C preprocessing and header discovery
 // ---------------------------------------------------------------------------
 
 static inline char* run_capture(const char* command) {
@@ -711,6 +743,72 @@ static inline char* run_capture(const char* command) {
     buf_reserve(&b, 1);
     b.data[b.len] = '\0';
     return b.data;
+}
+
+static char* preprocess_c(SrcFile* f, Token at, const char* source, const char* option) {
+    const char* tmpdir = getenv("TMPDIR");
+    char* tmp = xstrf("%s/typedc-XXXXXX.c", tmpdir && *tmpdir ? tmpdir : "/tmp");
+    int fd = mkstemps(tmp, 2);
+    if (fd < 0) fatal(f->path, at, "cannot create a temporary file for C preprocessing");
+    size_t len = strlen(source);
+    if (write(fd, source, len) != (ssize_t)len) {
+        close(fd);
+        unlink(tmp);
+        fatal(f->path, at, "cannot write a temporary file for C preprocessing");
+    }
+    close(fd);
+
+    Buf cmd = {0};
+    buf_printf(&cmd, "%s -E -x c", g_opt.cc);
+    for (size_t i = 0; i < g_opt.cpp_args.len; i++)
+        buf_printf(&cmd, " %s", shell_quote((const char*)g_opt.cpp_args.items[i]));
+    buf_printf(&cmd, " -I%s %s %s", shell_quote(path_dir(f->path)), option, shell_quote(tmp));
+    char* result = run_capture(buf_str(&cmd));
+    unlink(tmp);
+    if (!result) fatal(f->path, at, "C preprocessing failed using '%s'", g_opt.cc);
+    return result;
+}
+
+static const char* preprocess_constant(SrcFile* f, Token source) {
+    Buf input = {0};
+    Lexer lex = lexer_new(f->source);
+    for (;;) {
+        Token tok = lexer_next(&lex);
+        if (tok.kind == TK_EOF || tok.start >= source.start) break;
+        if (tok.kind != TK_RAW && tok.kind != TK_INCLUDE) continue;
+        size_t row = tok.row;
+        if (tok.kind == TK_RAW)
+            for (size_t i = 2; i < tok.length && isspace((unsigned char)tok.start[i]); i++)
+                if (tok.start[i] == '\n') row++;
+        buf_puts(&input, source_line(f, row));
+        buf_puts(&input, tok.kind == TK_RAW ? raw_text(tok) : tok_str(tok));
+        buf_putc(&input, '\n');
+    }
+
+    // String markers survive macro expansion and delimit the expression from raw C output.
+    const char* begin = "\"__typedc_constant_begin__\"";
+    const char* end = "\"__typedc_constant_end__\"";
+    buf_printf(&input, "%s\n%s", begin, source_line(f, source.row));
+    const char* text = tok_str(source);
+    const char* pos = text;
+    lex = lexer_new(text);
+    for (;;) {
+        Token tok = lexer_next(&lex);
+        if (tok.kind == TK_EOF) break;
+        if (tok.kind != TK_RAW) continue;
+        buf_putn(&input, pos, (size_t)(tok.start - pos));
+        buf_puts(&input, raw_text(tok));
+        pos = tok.start + tok.length;
+    }
+    buf_printf(&input, "%s\n%s\n", pos, end);
+    const char* result = preprocess_c(f, source, buf_str(&input), "-P");
+    const char* first = strstr(result, begin);
+    const char* last = first ? strstr(first + strlen(begin), end) : NULL;
+    if (!last) fatal(f->path, source, "constant expression was excluded by C preprocessing");
+    first += strlen(begin);
+    while (first < last && isspace((unsigned char)*first)) first++;
+    while (last > first && isspace((unsigned char)last[-1])) last--;
+    return xstrn(first, (size_t)(last - first));
 }
 
 // Some macros stand for a type (`bool`, `complex`, ...). Those must act as type
@@ -782,27 +880,8 @@ static inline Module* cunit_for_file(SrcFile* f) {
     Module* unit = (Module*)map_get(&g_cunits, key);
     if (unit) return unit;
 
-    const char* tmpdir = getenv("TMPDIR");
-    char* tmp = xstrf("%s/typedc-XXXXXX.c", tmpdir && *tmpdir ? tmpdir : "/tmp");
-    int fd = mkstemps(tmp, 2);
-    if (fd < 0) fatal(f->path, (Token){0}, "cannot create a temporary file for header discovery");
-    if (write(fd, text.data, text.len) != (ssize_t)text.len) {
-        close(fd);
-        unlink(tmp);
-        fatal(f->path, (Token){0}, "cannot write a temporary file for header discovery");
-    }
-    close(fd);
-
-    Buf cmd = {0};
-    buf_printf(&cmd, "%s -E -x c", g_opt.cc);
-    for (size_t i = 0; i < g_opt.cpp_args.len; i++)
-        buf_printf(&cmd, " %s", shell_quote((const char*)g_opt.cpp_args.items[i]));
-    buf_printf(&cmd, " -I%s", shell_quote(dir));
-    char* declarations = run_capture(xstrf("%s -P %s", buf_str(&cmd), shell_quote(tmp)));
-    char* macros = declarations ? run_capture(xstrf("%s -dM %s", buf_str(&cmd), shell_quote(tmp))) : NULL;
-    unlink(tmp);
-    if (!declarations)
-        fatal(f->path, (Token){0}, "header discovery failed: '%s' could not preprocess this file's #include lines", g_opt.cc);
+    char* declarations = preprocess_c(f, (Token){0}, buf_str(&text), "-P");
+    const char* macros = preprocess_c(f, (Token){0}, buf_str(&text), "-dM");
 
     unit = module_new("<C headers>");
     unit->is_c = 1;

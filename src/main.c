@@ -18,7 +18,7 @@ static void usage(FILE* out) {
         "  --line-directives  write #line directives, so the C compiler reports errors\n"
         "                     at the Typed C source instead of the generated file\n"
         "  --ast              print the syntax tree of the input files and stop\n"
-        "  --cc <command>     C compiler used to preprocess #include'd headers\n"
+        "  --cc <command>     C compiler used for preprocessing\n"
         "                     (default: $CC, else cc)\n"
         "  -I<dir> -D<macro> -U<macro> -include <file> -isystem <dir> -std=<std>\n"
         "                     passed to that compiler; use the flags of your C build\n"
