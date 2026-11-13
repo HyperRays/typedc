@@ -2,7 +2,7 @@
 
 I decided to make this language on whim after watching the very funny stream from tsoding. The big idea was, instead of stripping down rust and trying to use it like c, what if you added generics to c with rust syntax.
 
-The way I did this was by extending the syntax of c with the classic rust angle brackets wherever you would expect to define generics and then during transpilation do some name mangling to monomorphize the generic code.
+The way I did this was by extending the syntax of c with the classic rust angle brackets and then during transpilation do some name mangling to monomorphize the generic code.
 
 I have tried to keep the code as clean as possible, but since I don't really have that much time, I have used AI to generate some of the code. **Please do not use this in production, it's a just a funny project that I did. (Unless you like living on the edge, I take no liability whatsoever)**
 
