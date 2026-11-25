@@ -414,6 +414,7 @@ static Type* const_from_value(Type* base, long long value) {
 
 static Expr* const_preprocess(Ctx* c, Expr* e) {
     if (!e->source.start) return e;
+    if (!e->expanded) e->expanded = constant_batched(c->file, e->source);
     if (!e->expanded) e->expanded = preprocess_constant(c->file, e->source);
     Parser* p = (Parser*)xalloc(sizeof(Parser));
     *p = parser_new(e->expanded);

@@ -114,3 +114,44 @@ int main(int argc, char** argv) {
     if (wrong && !(&config).from_toml(wrong)) printf("\n%s\n", std::toml_mismatch);
     return 0;
 }
+
+//> revision 42, level 2, 2 servers
+//> alpha at 10.0.0.1:8080 (tls), weight 1, 2 roles
+//> beta at 10.0.0.2:9090, weight 0.25, 0 roles
+//> 
+//> title = "TOML éxample \u001B[0m"
+//> revision = 43
+//> updated = 2026-11-25T10:30:00Z
+//> matrix = [[1, 2], [3, 4, 5]]
+//> 
+//> [logging]
+//> level = "DEBUG"
+//> file = "C:\\logs\\app.log"
+//> 
+//> [[servers]]
+//> name = "alpha"
+//> roles = ["web", "cache"]
+//> weight = 1.0
+//> 
+//> [servers.endpoint]
+//> host = "10.0.0.1"
+//> port = 8080
+//> tls = true
+//> 
+//> [[servers]]
+//> name = "beta"
+//> roles = []
+//> weight = 0.25
+//> 
+//> [servers.endpoint]
+//> host = "10.0.0.2"
+//> port = 9090
+//> tls = true
+//> 
+//> [extra]
+//> tags = ["a", "b"]
+//> 
+//> [extra.owner]
+//> name = "Tom"
+//> 
+//> servers[0].endpoint.port: expected an integer, found a string

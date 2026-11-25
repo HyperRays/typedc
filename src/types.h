@@ -618,6 +618,21 @@ typedef struct {
     Token tok;
 } Import;
 
+// The expressions of a file that may go through the C preprocessor as
+// constants. They are preprocessed together, the first time one of them is
+// needed (load.h).
+typedef struct {
+    List exprs;             // Expr*: collected by the parser
+    Map expanded;           // constant_key() of each -> its preprocessed text, NULL until known
+    int done;               // the batch has run
+} ConstantBatch;
+
+// Where a constant expression is in its file's source. An expression has the
+// same key only in a file that shares that source text.
+static inline const char* constant_key(Token source) {
+    return xstrf("%p:%zu", (const void*)source.start, source.length);
+}
+
 struct SrcFile {
     const char* path;
     const char* stem;       // file name without directory and extension
@@ -635,6 +650,7 @@ struct SrcFile {
     Map dotops;             // dotted operators visible in this file -> packed binding powers
     List ct_imports;        // Import*: what the '@' functions of the file import in their bodies (comptime.h)
     Local* captured;        // the file of an emitted item: the variables of the '@' function that emitted it
+    ConstantBatch* constants;   // shared with the copies made of the file for emitted items
 };
 
 // A namespace (one directory), or the declarations of a set of C headers

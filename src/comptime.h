@@ -320,6 +320,7 @@ typedef struct {
 enum { CT_UNSIGNED = 16, CT_TRUTH = 32, CT_FLOAT = 64 };
 
 #define CT_STACK (1 << 20)      // bytes for the variables of the code that is running
+#define CT_NULL_REACH 4096      // addresses below this are null, or a member or element of what null points to
 #define CT_CALLS 200            // calls that can be in progress at once
 #define CT_PASSES 1000000       // passes of one loop that is run at compile time
 
@@ -549,7 +550,9 @@ static long ct_room(Ctx* c, Token at, long bytes) {
 static int ct_reads(Ctx* c, Token at, void* address, long size) {
     char* p = (char*)address;
     if (ct_dry) return 0;
-    if (!p) FAIL(c, at, "a null pointer is dereferenced at compile time");
+    // A member or element of what a null pointer points to is a little past
+    // null; no compile-time value is ever that low in memory
+    if ((uintptr_t)p < CT_NULL_REACH) FAIL(c, at, "a null pointer is dereferenced at compile time");
     for (long word = (p - ct_at(0)) / 8; p >= ct_at(0) && p + size <= ct_at(CT_STACK); word++) {
         if (word * 8 >= p - ct_at(0) + (size ? size : 1)) return 1;
         if (ct_gaps[word]) FAIL(c, at, "a pointer is dereferenced at compile time outside the value it points into");
@@ -1015,7 +1018,9 @@ static char* ct_place(Ctx* c, Expr* e, Type** type) {
         ct_layout(c, e->name, base, NULL, tok_str(e->name), &offset, type);
         if (!*type) FAIL(c, e->name, "type '%s' has no member '%s'", type_show(base), tok_str(e->name));
         if (ct_bit_field) FAIL(c, e->name, "bit-field '%s' cannot be read or changed at compile time", tok_str(e->name));
-        return address + offset;
+        // Worked out as a number: the address may be null, as in the offsetof
+        // idiom `&((T*)0)->member`. Only reading or writing there fails (ct_reads).
+        return (char*)((uintptr_t)address + (uintptr_t)offset);
     }
     if (e->kind == E_INDEX) {
         // an array is where its first element is, and a pointer holds the address of one
@@ -1025,7 +1030,8 @@ static char* ct_place(Ctx* c, Expr* e, Type** type) {
         if (!(*type = ct_pointee(base.type))) FAIL(c, op, "a value of type '%s' cannot be indexed", type_show(base.type));
         if (k->kind == TY_ARRAY && k->has_size_value && !ct_dry && (index < 0 || index >= k->size_value))
             FAIL(c, op, "index %lld is outside an array of %lld", (long long)index, (long long)k->size_value);
-        return (char*)(intptr_t)base.v + index * ct_size(c, op, *type);
+        // likewise worked out as a number, for any pointer
+        return (char*)((uintptr_t)base.v + (uintptr_t)(index * ct_size(c, op, *type)));
     }
     if (e->kind == E_UNARY) {
         CtValue pointer = ct_eval(c, e->left);

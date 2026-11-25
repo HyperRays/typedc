@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <setjmp.h>
 #include "lexer.h"
+#include "util.h"
 
 typedef struct {
     const char* text;
@@ -125,6 +126,11 @@ typedef struct Parser {
     int (*lookup_generic)(void* env, const Token* segments, int count, int member);
 
     int const_args;             // constant generic arguments parsed so far
+
+    // When set, collects the expressions that may go through the C preprocessor
+    // as constants (generic arguments, array sizes, enumerator values), so a
+    // file's constants can be preprocessed together (load.h)
+    List* constants;
 
     // Syntax errors end the external declaration they are in; parsing goes on
     // with the next one. Without a recovery point an error exits.
@@ -2068,6 +2074,9 @@ static inline Expr* parse_type_args(Parser* p) {
         if (!p->preprocessed && !p->header_mode) {
             arg->source = start;
             arg->source.length = (size_t)(parser_peek(p).start - start.start);
+            // a type is never a constant
+            if (p->constants && !(arg->kind >= E_TY_BASE && arg->kind <= E_TY_HOLE))
+                list_push(p->constants, arg);
         }
         expr_push(args, arg);
         if (!token_punct(parser_peek(p), ",")) break;
@@ -2370,6 +2379,7 @@ static inline Expr* parse_enum_specifier(Parser* p) {
                     item->left = expr_new(E_ALL, eq, NULL, NULL);
                 } else {
                     item->left = parse_constant_expression(p);
+                    if (p->constants && item->left && item->left->source.start) list_push(p->constants, item->left);
                 }
             }
             // enumerators are ordinary identifiers and hide type names
@@ -2448,6 +2458,7 @@ static inline Expr* parse_declarator_suffixes(Parser* p, Expr* base) {
                 parser_skip_until(p, "]");
             } else {
                 array->right = parse_assignment_expression(p);
+                if (p->constants && array->right && array->right->source.start) list_push(p->constants, array->right);
             }
         }
         parser_expect(p, "]");

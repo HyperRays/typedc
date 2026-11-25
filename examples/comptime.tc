@@ -79,13 +79,13 @@ int main(void) {
 
 // The program prints:
 
-// Line { width = 7 }
-// Point { x = 3 y = 4 }
-// fib(30) = 832040, 3 ints, state STOPPED
-// from   Point        at  0
-// to     Point        at  8
-// label  const char*  at 16
-// width  int          at 24
+//> Line { width = 7 }
+//> Point { x = 3 y = 4 }
+//> fib(30) = 832040, 3 ints, state STOPPED
+//> from   Point        at  0
+//> to     Point        at  8
+//> label  const char*  at 16
+//> width  int          at 24
 
 // and among what typedc generates for it are:
 

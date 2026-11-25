@@ -737,8 +737,12 @@ static inline void file_parse(SrcFile* f) {
     p.lookup_type = env_lookup_type;
     p.lookup_dotop = env_lookup_dotop;
     p.lookup_generic = env_lookup_generic;
+    f->constants = (ConstantBatch*)xalloc(sizeof(ConstantBatch));
+    p.constants = &f->constants->exprs;
     f->ast = parse_translation_unit(&p);
     g_error_count += p.errors;
+    for (size_t i = 0; i < f->constants->exprs.len; i++)
+        map_put(&f->constants->expanded, constant_key(((Expr*)f->constants->exprs.items[i])->source), NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -759,16 +763,18 @@ static inline char* run_capture(const char* command) {
     return b.data;
 }
 
-static char* preprocess_c(SrcFile* f, Token at, const char* source, const char* option) {
+// Runs the C preprocessor on `source`. Returns NULL if that fails; `quiet`
+// keeps what it reports from the user's terminal.
+static char* preprocess_c_try(SrcFile* f, const char* source, const char* option, int quiet) {
     const char* tmpdir = getenv("TMPDIR");
     char* tmp = xstrf("%s/typedc-XXXXXX.c", tmpdir && *tmpdir ? tmpdir : "/tmp");
     int fd = mkstemps(tmp, 2);
-    if (fd < 0) fatal(f->path, at, "cannot create a temporary file for C preprocessing");
+    if (fd < 0) return NULL;
     size_t len = strlen(source);
     if (write(fd, source, len) != (ssize_t)len) {
         close(fd);
         unlink(tmp);
-        fatal(f->path, at, "cannot write a temporary file for C preprocessing");
+        return NULL;
     }
     close(fd);
 
@@ -777,10 +783,59 @@ static char* preprocess_c(SrcFile* f, Token at, const char* source, const char* 
     for (size_t i = 0; i < g_opt.cpp_args.len; i++)
         buf_printf(&cmd, " %s", shell_quote((const char*)g_opt.cpp_args.items[i]));
     buf_printf(&cmd, " -I%s %s %s", shell_quote(path_dir(f->path)), option, shell_quote(tmp));
+    if (quiet) buf_puts(&cmd, " 2>/dev/null");
     char* result = run_capture(buf_str(&cmd));
     unlink(tmp);
+    return result;
+}
+
+static char* preprocess_c(SrcFile* f, Token at, const char* source, const char* option) {
+    char* result = preprocess_c_try(f, source, option, 0);
     if (!result) fatal(f->path, at, "C preprocessing failed using '%s'", g_opt.cc);
     return result;
+}
+
+// An #include line or raw C block of a file, as input to the C preprocessor
+static void put_directive(Buf* input, SrcFile* f, Token tok) {
+    size_t row = tok.row;
+    if (tok.kind == TK_RAW)
+        for (size_t i = 2; i < tok.length && isspace((unsigned char)tok.start[i]); i++)
+            if (tok.start[i] == '\n') row++;
+    buf_puts(input, source_line(f, row));
+    buf_puts(input, tok.kind == TK_RAW ? raw_text(tok) : tok_str(tok));
+    buf_putc(input, '\n');
+}
+
+// A constant expression as input to the C preprocessor, between two string
+// markers. String markers survive macro expansion and delimit the expression
+// from raw C output.
+static void put_constant(Buf* input, SrcFile* f, Token source, const char* begin, const char* end) {
+    buf_printf(input, "%s\n%s", begin, source_line(f, source.row));
+    const char* text = tok_str(source);
+    const char* pos = text;
+    Lexer lex = lexer_new(text);
+    for (;;) {
+        Token tok = lexer_next(&lex);
+        if (tok.kind == TK_EOF) break;
+        if (tok.kind != TK_RAW) continue;
+        buf_putn(input, pos, (size_t)(tok.start - pos));
+        buf_puts(input, raw_text(tok));
+        pos = tok.start + tok.length;
+    }
+    buf_printf(input, "%s\n%s\n", pos, end);
+}
+
+// The preprocessed expression between two markers in `output`, or NULL if the
+// markers are not there. `*after` is set to where the end marker finishes.
+static const char* constant_between(const char* output, const char* begin, const char* end, const char** after) {
+    const char* first = strstr(output, begin);
+    const char* last = first ? strstr(first + strlen(begin), end) : NULL;
+    if (!last) return NULL;
+    if (after) *after = last + strlen(end);
+    first += strlen(begin);
+    while (first < last && isspace((unsigned char)*first)) first++;
+    while (last > first && isspace((unsigned char)last[-1])) last--;
+    return xstrn(first, (size_t)(last - first));
 }
 
 static const char* preprocess_constant(SrcFile* f, Token source) {
@@ -789,40 +844,75 @@ static const char* preprocess_constant(SrcFile* f, Token source) {
     for (;;) {
         Token tok = lexer_next(&lex);
         if (tok.kind == TK_EOF || tok.start >= source.start) break;
-        if (tok.kind != TK_RAW && tok.kind != TK_INCLUDE) continue;
-        size_t row = tok.row;
-        if (tok.kind == TK_RAW)
-            for (size_t i = 2; i < tok.length && isspace((unsigned char)tok.start[i]); i++)
-                if (tok.start[i] == '\n') row++;
-        buf_puts(&input, source_line(f, row));
-        buf_puts(&input, tok.kind == TK_RAW ? raw_text(tok) : tok_str(tok));
-        buf_putc(&input, '\n');
+        if (tok.kind == TK_RAW || tok.kind == TK_INCLUDE) put_directive(&input, f, tok);
     }
-
-    // String markers survive macro expansion and delimit the expression from raw C output.
     const char* begin = "\"__typedc_constant_begin__\"";
     const char* end = "\"__typedc_constant_end__\"";
-    buf_printf(&input, "%s\n%s", begin, source_line(f, source.row));
-    const char* text = tok_str(source);
-    const char* pos = text;
-    lex = lexer_new(text);
+    put_constant(&input, f, source, begin, end);
+    const char* result = preprocess_c(f, source, buf_str(&input), "-P");
+    const char* text = constant_between(result, begin, end, NULL);
+    if (!text) fatal(f->path, source, "constant expression was excluded by C preprocessing");
+    return text;
+}
+
+static int constant_order(const void* a, const void* b) {
+    const char* x = (*(Expr* const*)a)->source.start;
+    const char* y = (*(Expr* const*)b)->source.start;
+    return x < y ? -1 : x > y;
+}
+
+// Preprocesses every constant the parser collected in a file with one run of
+// the C preprocessor, instead of one run each. In the input, each constant
+// comes after exactly the #include lines and raw C blocks that come before it
+// in the file, as when it is preprocessed alone (preprocess_constant), so it
+// sees the same macros. What this does not settle (the run fails, or #if
+// leaves a constant out) stays NULL, and is left to preprocess_constant,
+// which then reports the error as it always has.
+static void constants_preprocess(SrcFile* f, ConstantBatch* batch) {
+    List* list = &batch->exprs;
+    qsort(list->items, list->len, sizeof(void*), constant_order);
+
+    Buf input = {0};
+    Lexer lex = lexer_new(f->source);
+    size_t next = 0;
+    char begin[64], end[64];
     for (;;) {
         Token tok = lexer_next(&lex);
+        for (; next < list->len; next++) {
+            Token source = ((Expr*)list->items[next])->source;
+            if (tok.kind != TK_EOF && source.start > tok.start) break;
+            snprintf(begin, sizeof begin, "\"__typedc_constant_%zu_begin__\"", next);
+            snprintf(end, sizeof end, "\"__typedc_constant_%zu_end__\"", next);
+            put_constant(&input, f, source, begin, end);
+        }
         if (tok.kind == TK_EOF) break;
-        if (tok.kind != TK_RAW) continue;
-        buf_putn(&input, pos, (size_t)(tok.start - pos));
-        buf_puts(&input, raw_text(tok));
-        pos = tok.start + tok.length;
+        if (tok.kind == TK_RAW || tok.kind == TK_INCLUDE) put_directive(&input, f, tok);
     }
-    buf_printf(&input, "%s\n%s\n", pos, end);
-    const char* result = preprocess_c(f, source, buf_str(&input), "-P");
-    const char* first = strstr(result, begin);
-    const char* last = first ? strstr(first + strlen(begin), end) : NULL;
-    if (!last) fatal(f->path, source, "constant expression was excluded by C preprocessing");
-    first += strlen(begin);
-    while (first < last && isspace((unsigned char)*first)) first++;
-    while (last > first && isspace((unsigned char)last[-1])) last--;
-    return xstrn(first, (size_t)(last - first));
+
+    const char* output = preprocess_c_try(f, buf_str(&input), "-P", 1);
+    if (!output) return;
+    const char* from = output;
+    for (size_t i = 0; i < list->len; i++) {
+        snprintf(begin, sizeof begin, "\"__typedc_constant_%zu_begin__\"", i);
+        snprintf(end, sizeof end, "\"__typedc_constant_%zu_end__\"", i);
+        const char* text = constant_between(from, begin, end, &from);
+        if (text) map_put(&batch->expanded, constant_key(((Expr*)list->items[i])->source), (void*)text);
+    }
+}
+
+// The preprocessed text of a constant expression from its file's batch, or
+// NULL if the batch does not have it. The batch runs when the first of its
+// constants is needed, so a file whose constants never are costs nothing.
+static const char* constant_batched(SrcFile* f, Token source) {
+    ConstantBatch* batch = f->constants;
+    if (!batch) return NULL;
+    const char* key = constant_key(source);
+    if (!map_has(&batch->expanded, key)) return NULL;  // not collected from this file's text
+    if (!batch->done) {
+        batch->done = 1;
+        constants_preprocess(f, batch);
+    }
+    return (const char*)map_get(&batch->expanded, key);
 }
 
 // Some macros stand for a type (`bool`, `complex`, ...). Those must act as type
