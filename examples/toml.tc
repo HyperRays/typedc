@@ -1,0 +1,116 @@
+// TOML with the namespace std: a document is parsed, read into structs,
+// changed, and written again. What converts the structs is derived.
+//
+//   ./build/main --root . examples/toml.tc | cc -std=c11 -x c - -o build/toml
+//   ./build/toml                 runs the example
+//   ./build/toml file.toml       parses the file and writes it back out
+
+#include <stdio.h>
+import std;
+
+typedef enum { DEBUG, INFO, WARNING } Level;
+
+typedef struct { const char* host; unsigned short port; _Bool tls; } Endpoint;
+typedef struct { const char* name; Endpoint endpoint; std::Array<const char*> roles; double weight; } Server;
+typedef struct { Level level; const char* file; } Logging;
+
+typedef struct {
+    const char* title;
+    long long revision;
+    std::TomlDateTime updated;
+    Logging logging;
+    std::Array<Server> servers;
+    std::Array<std::Array<int>> matrix;
+    std::TomlValue* extra;       // whatever the document has under `extra`
+} Config;
+
+std::@derive_toml<Config>();
+
+static const char* const example =
+    "# what the example reads\n"
+    "title = \"TOML \\u00e9xample \\e[0m\"\n"
+    "revision = 0x2A\n"
+    "updated = 2026-11-25 10:30Z\n"
+    "matrix = [[1, 2], [3, 4, 5,],]\n"
+    "extra = { owner.name = \"Tom\", tags = [\n"
+    "    \"a\", 'b',   # a comment in an array in an inline table\n"
+    "], }\n"
+    "\n"
+    "[logging]\n"
+    "level = \"WARNING\"\n"
+    "file = '''C:\\logs\\app.log'''\n"
+    "\n"
+    "[[servers]]\n"
+    "name = \"alpha\"\n"
+    "roles = [\"web\", \"cache\"]\n"
+    "weight = 1\n"
+    "endpoint = { host = \"10.0.0.1\", port = 8_080, tls = true }\n"
+    "\n"
+    "[[servers]]\n"
+    "name = \"beta\"\n"
+    "roles = []\n"
+    "weight = 2.5e-1\n"
+    "[servers.endpoint]\n"
+    "host = \"10.0.0.2\"\n"
+    "port = 9090\n";
+
+// Returns the text of a file, with a 0 behind it, and its length.
+static char* read_file(const char* path, size_t* length) {
+    FILE* file = fopen(path, "rb");
+    std::Array<char> text = 0;
+    if (!file) return 0;
+    for (int c = fgetc(file); c != EOF; c = fgetc(file)) (&text).push((char)c);
+    fclose(file);
+    *length = text.count();
+    (&text).push(0);
+    return text;
+}
+
+int main(int argc, char** argv) {
+    // printf("%s", example);
+    // return 0;
+    std::TomlError error;
+    if (argc > 1) {
+        // parse a file and write it back out
+        size_t length = 0;
+        char* text = read_file(argv[1], &length);
+        if (!text) {
+            fprintf(stderr, "%s: cannot read the file\n", argv[1]);
+            return 2;
+        }
+        std::TomlValue* document = std::toml_parse_text(text, length, &error);
+        if (!document) {
+            fprintf(stderr, "%s:%d:%d: %s\n", argv[1], error.line, error.column, error.message);
+            return 1;
+        }
+        fputs(document.write(), stdout);
+        return 0;
+    }
+
+    std::TomlValue* document = std::toml_parse(example, &error);
+    if (!document) {
+        printf("%d:%d: %s\n", error.line, error.column, error.message);
+        return 1;
+    }
+    Config config = {0};
+    if (!(&config).from_toml(document)) {
+        printf("%s\n", std::toml_mismatch);
+        return 1;
+    }
+    printf("revision %lld, level %d, %d servers\n", config.revision, (int)config.logging.level, (int)config.servers.count());
+    for (int i = 0; i < (int)config.servers.count(); i++) {
+        Server s = config.servers[i];
+        printf("%s at %s:%d%s, weight %g, %d roles\n", s.name, s.endpoint.host, s.endpoint.port, s.endpoint.tls ? " (tls)" : "", s.weight, (int)s.roles.count());
+    }
+
+    // change the struct and write it as a document
+    config.revision++;
+    config.logging.level = DEBUG;
+    config.servers[1].endpoint.tls = 1;
+    printf("\n%s", config.to_toml().write());
+
+    // a value of the wrong kind is refused, with the way to it
+    std::TomlValue* wrong = std::toml_parse("servers = [{ name = \"gamma\", endpoint = { port = \"http\" } }]", &error);
+    if (wrong && !(&config).from_toml(wrong)) printf("\n%s\n", std::toml_mismatch);
+    return 0;
+}

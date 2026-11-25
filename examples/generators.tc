@@ -1,0 +1,261 @@
+// Generators: '@' functions that add declarations to the program.
+// ./build/main examples/generators.tc | cc -std=c11 -x c - -o build/generators
+
+#include <stdio.h>
+
+trait Show { void show(Self self); }
+
+impl Show for int { void show(Self self) { printf("%d", self); } }
+impl Show for double { void show(Self self) { printf("%g", self); } }
+impl Show for float { void show(Self self) { printf("%g", self); } }
+
+typedef struct { int x; int y; } Point;
+typedef struct { Point from; Point to; double width; } Line;
+typedef<T> struct { T value; Tree<T>* left; Tree<T>* right; } Tree<T>;
+
+// Inside an '@' function, `@emit` puts the declaration that follows into the
+// program; everything else in the function is its own. What is emitted can use
+// the function's generic arguments and variables, with the values they have at
+// that moment.
+//
+// An emitted item belongs where the generator is used, and reads names as the
+// code there does. So a generator is self-contained: what its items need from
+// elsewhere, it imports and includes in its own body. Nothing else of the file
+// it is written in reaches them.
+void @derive_show<T>() {
+    #include <stdio.h>
+    import builtin;
+
+    // A generator looks at the program and decides for itself what to do.
+    // @implements is true as soon as the implementation exists, whether it was
+    // written by hand or emitted, in whatever order the generators run.
+    if (@implements<T, Show>()) return;
+
+    if (@kind<T>() == builtin::FieldKind::FIELD_POINTER) {
+        @emit impl Show for T {
+            void show(Self self) {
+                if (self) (*self).show();
+                else printf("null");
+            }
+        }
+        @derive_show<@pointee<T>()>();
+        return;
+    }
+
+    // The item exists from here on. Its body is worked out later, when the
+    // implementations it calls exist as well.
+    @emit impl Show for T {
+        void show(Self self) {
+            printf("%s { ", @name<T>());
+            for (@int i = 0; i < @count<T>(); i++) {
+                builtin::@Field f = @fields<T>()[i];
+                if (i) printf(", ");
+                printf("%s: ", f.name);
+                self.[f].show();
+            }
+            printf(" }");
+        }
+    }
+
+    // Emitted first, so a type that contains itself ends: when the function
+    // comes to Tree again, Tree already implements Show.
+    for (int i = 0; i < @count<T>(); i++)
+        @derive_show<@fields<T>()[i].type>();
+}
+
+// An '@' call at file scope starts a generator. Its items are declared here,
+// in the file that starts it, which is where `Show` is looked up.
+@derive_show<Line>();
+for<T> @derive_show<Tree<T>>();
+
+// Any declaration can be emitted, and '@' functions take ordinary arguments.
+// Items of one generator see each other: they are declared side by side.
+void @counter(const char* label, int start) {
+    #include <stdio.h>
+    @emit static int count = start;
+    @emit int next(void) {
+        printf("%s %d\n", label, count);
+        return count++;
+    }
+}
+
+@counter("ticket", 100);
+
+int main(void) {
+    Line l = {{1, 2}, {3, 4}, 0.5};
+    Tree<float> leaf = {2, 0, 0};
+    Tree<float> root = {1, &leaf, 0};
+    l.show();
+    printf("\n");
+    root.show();
+    printf("\n");
+    next();
+    next();
+    return 0;
+}
+
+//> Line { from: Point { x: 1, y: 2 }, to: Point { x: 3, y: 4 }, width: 0.5 }
+//> Tree { value: 1, left: Tree { value: 2, left: null, right: null }, right: null }
+//> ticket 100
+//> ticket 101
+
+// Among what typedc generates for it:
+
+// #ifndef TYPEDC_GENERATORS_H
+// #define TYPEDC_GENERATORS_H
+
+// Generators: '@' functions that add declarations to the program.
+// ./build/main examples/generators.tc | cc -std=c11 -x c - -o build/generators
+
+// #include <stdio.h>
+// #include <stddef.h>
+//
+// typedef struct Tree Tree;
+//
+// typedef enum {
+//     FIELD_OTHER,
+//     FIELD_BOOL,
+//     FIELD_CHAR,
+//     FIELD_SCHAR,
+//     FIELD_UCHAR,
+//     FIELD_SHORT,
+//     FIELD_USHORT,
+//     FIELD_INT,
+//     FIELD_UINT,
+//     FIELD_LONG,
+//     FIELD_ULONG,
+//     FIELD_LLONG,
+//     FIELD_ULLONG,
+//     FIELD_FLOAT,
+//     FIELD_DOUBLE,
+//     FIELD_LDOUBLE,
+//     FIELD_POINTER,
+//     FIELD_ARRAY,
+//     FIELD_STRUCT,
+//     FIELD_UNION,
+//     FIELD_ENUM,
+//     FIELD_FUNCTION,
+//     FIELD_FUNCTION_POINTER,
+// } FieldKind;
+//
+// typedef struct {
+//     const char* name;
+//     const char* type_name;
+//     size_t offset;
+//     size_t size;
+//     unsigned int bits;
+//     FieldKind kind;
+// } Field;
+//
+// typedef struct {
+//     const char* name;
+//     long long value;
+// } Enumerator;
+//
+// typedef struct {
+//     const char* name;
+//     const char* type_name;
+//     const char* value;
+// } Generic;
+//
+// typedef struct {
+//     int x;
+//     int y;
+// } Point;
+//
+// typedef struct {
+//     Point from;
+//     Point to;
+//     double width;
+// } Line;
+//
+// struct Tree {
+//     float value;
+//     Tree* left;
+//     Tree* right;
+// };
+//
+// int main(void);
+// static inline int next(void);
+// static inline void int_show(int self);
+// static inline void double_show(double self);
+// static inline void float_show(float self);
+// static inline void Line_show(Line self);
+// static inline void Point_show(Point self);
+// static inline void Tree_float_show(Tree self);
+// static inline void Tree_float_ptr_show(Tree* self);
+//
+// static int count = 100;
+//
+// int main(void) {
+//     Line l = {{1, 2}, {3, 4}, 0.5};
+//     Tree leaf = {2, 0, 0};
+//     Tree root = {1, &leaf, 0};
+//     Line_show(l);
+//     printf("\n");
+//     Tree_float_show(root);
+//     printf("\n");
+//     next();
+//     next();
+//     return 0;
+// }
+//
+// static inline int next(void) {
+//     printf("%s %d\n", "ticket", count);
+//     return count++;
+// }
+//
+// static inline void int_show(int self) {
+//     printf("%d", self);
+// }
+//
+// static inline void double_show(double self) {
+//     printf("%g", self);
+// }
+//
+// static inline void float_show(float self) {
+//     printf("%g", self);
+// }
+//
+// static inline void Line_show(Line self) {
+//     printf("%s { ", "Line");
+//     printf("%s: ", "from");
+//     Point_show(self.from);
+//     printf(", ");
+//     printf("%s: ", "to");
+//     Point_show(self.to);
+//     printf(", ");
+//     printf("%s: ", "width");
+//     double_show(self.width);
+//     printf(" }");
+// }
+//
+// static inline void Point_show(Point self) {
+//     printf("%s { ", "Point");
+//     printf("%s: ", "x");
+//     int_show(self.x);
+//     printf(", ");
+//     printf("%s: ", "y");
+//     int_show(self.y);
+//     printf(" }");
+// }
+//
+// static inline void Tree_float_show(Tree self) {
+//     printf("%s { ", "Tree");
+//     printf("%s: ", "value");
+//     float_show(self.value);
+//     printf(", ");
+//     printf("%s: ", "left");
+//     Tree_float_ptr_show(self.left);
+//     printf(", ");
+//     printf("%s: ", "right");
+//     Tree_float_ptr_show(self.right);
+//     printf(" }");
+// }
+//
+// static inline void Tree_float_ptr_show(Tree* self) {
+//     if (self)
+//         Tree_float_show(*self);
+//     else
+//         printf("null");
+// }

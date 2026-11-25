@@ -1,0 +1,106 @@
+// Compile-time code: functions that run inside the compiler, values that only
+// exist there, and what they turn the surrounding code into.
+// ./build/main examples/comptime.tc | cc -std=c11 -x c - -o build/comptime
+
+#include <stdio.h>
+// the namespace `builtin` comes with the compiler; it describes types
+import builtin;
+
+typedef struct { int x; int y; } Point;
+typedef struct { Point from; Point to; const char* label; int width; } Line;
+typedef enum { IDLE, RUNNING, STOPPED = 5 } State;
+
+// A function whose name starts with '@' runs at compile time. It has no
+// runtime form: nothing of it reaches the generated C, only its results do.
+int @fib(int n) {
+    if (n < 2) return n;
+    return @fib(n - 1) + @fib(n - 2);
+}
+
+// The predefined '@' functions ask the compiler about the program.
+// @count<T>() is the number of members of a struct.
+int @int_fields<T>() {
+    int found = 0;
+    for (int i = 0; i < @count<T>(); i++)
+        if (@fields<T>()[i].kind == builtin::FieldKind::FIELD_INT) found++;
+    return found;
+}
+
+// The result of an '@' call is a compile-time value, usable wherever C wants
+// a constant.
+int scratch[@int_fields<Line>() + @int_fields<Point>()];
+
+// A compile-time value may initialize a runtime variable of the same type:
+// this is a table of the names, types, offsets and sizes of Line's members.
+static const builtin::Field line_fields[] = @fields<Line>();
+
+// A type prefixed with '@' declares a compile-time variable. Ordinary code is
+// emitted as it is written; only what compile-time values decide is evaluated:
+//  - an expression made of them is replaced by its value,
+//  - a loop or branch on them is unrolled or decided, and disappears.
+// `value->[f]` is the member that the field f describes.
+void print<T>(T* value) {
+    printf("%s {", @name<T>());
+    for (@int i = 0; i < @count<T>(); i++) {
+        builtin::@Field f = @fields<T>()[i];
+        if (f.kind != builtin::FieldKind::FIELD_INT) continue;
+        printf(" %s = %d", f.name, value->[f]);
+    }
+    printf(" }\n");
+}
+
+// The enumerators of an enum, as names and values
+const char* state_name(State s) {
+    const builtin::@Enumerator all[] = @enumerators<State>();
+    for (@int i = 0; i < 3; i++)
+        if (s == all[i].value) return all[i].name;
+    return "?";
+}
+
+// A type is a value too, of type @Type, and @type(...) uses one as a type
+void swap_first<T>(T* line) {
+    @Type member = @fields<T>()[0].type;
+    @type(member) kept = line->from;
+    line->from = line->to;
+    line->to = kept;
+}
+
+int main(void) {
+    Line l = {{1, 2}, {3, 4}, "edge", 7};
+    swap_first(&l);
+    print(&l);
+    print(&l.from);
+    printf("fib(30) = %d, %d ints, state %s\n", @fib(30), (int)(sizeof scratch / sizeof scratch[0]), state_name(STOPPED));
+    // an ordinary variable is never evaluated, so this stays a loop: over 4
+    for (int i = 0; i < @count<Line>(); i++)
+        printf("%-6s %-12s at %2d\n", line_fields[i].name, line_fields[i].type_name, (int)line_fields[i].offset);
+    return 0;
+}
+
+// The program prints:
+
+// Line { width = 7 }
+// Point { x = 3 y = 4 }
+// fib(30) = 832040, 3 ints, state STOPPED
+// from   Point        at  0
+// to     Point        at  8
+// label  const char*  at 16
+// width  int          at 24
+
+// and among what typedc generates for it are:
+
+// static const Field line_fields[] = {
+//     {"from", "Point", offsetof(Line, from), sizeof(((Line*)0)->from), 0, FIELD_STRUCT},
+//     {"to", "Point", offsetof(Line, to), sizeof(((Line*)0)->to), 0, FIELD_STRUCT},
+//     {"label", "const char*", offsetof(Line, label), sizeof(((Line*)0)->label), 0, FIELD_POINTER},
+//     {"width", "int", offsetof(Line, width), sizeof(((Line*)0)->width), 0, FIELD_INT},
+// };
+//
+// int scratch[3];
+//
+// static inline void Point_print(Point* value) {
+//     printf("%s {", "Point");
+//     printf(" %s = %d", "x", value->x);
+//     printf(" %s = %d", "y", value->y);
+//     printf(" }\n");
+// }
