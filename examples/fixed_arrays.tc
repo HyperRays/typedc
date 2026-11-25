@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <stddef.h>
 
-// Const generics also work on structs, the usual case is a size.
-// The array lives directly inside of the struct, and the length is
-// part of the type instead of a field which you have to carry around
+// Const generics also work on structs
 typedef<T, size_t N> struct {
     T items[N];
 } Row<T, N>;
@@ -26,9 +24,6 @@ Row<T, A + B> join<T, size_t A, size_t B>(Row<T, A> left, Row<T, B> right) {
     return out;
 }
 
-// K appears in no argument, so it comes from the type the result is
-// assigned to. Since both sizes are constants they can be checked
-// with a _Static_assert when the c code is compiled
 Row<T, K> take<T, size_t N, size_t K>(Row<T, N> row) {
     _Static_assert(K <= N, "cannot take more items than the row has");
     Row<T, K> out;
