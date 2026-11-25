@@ -1,0 +1,1148 @@
+// TOML v1.1.0 (https://toml.io/en/v1.1.0): a parser, a writer, and conversion
+// to and from structs that is derived at compile time.
+//
+//   import std;
+//
+// A document is parsed into a tree of TomlValue, and such a tree is written
+// as a document:
+//
+//   std::TomlError error;
+//   std::TomlValue* document = std::toml_parse(text, &error);
+//   char* text = document.write();
+//
+// For a struct,
+//
+//   std::@derive_toml<Config>();
+//
+// emits what converts between the struct and such a tree:
+//
+//   Config config = {0};
+//   (&config).from_toml(document);      // fills the struct from a table
+//   std::TomlValue* table = config.to_toml();
+//
+// A member can be an integer, a floating-point number, a _Bool, a string
+// (const char*), an enum (written as the name of its enumerator), another
+// struct (a table), a std::Array<T> of any of these (see array.tc), a
+// TomlDateTime, or a TomlValue* that takes whatever is there.
+//
+// An Array<T> is a T*. So once an Array<T> can be converted, every T* is
+// taken for one: a struct that is converted cannot have a pointer to a single
+// T next to it. examples/toml.tc shows all of this in use.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// ---------------------------------------------------------------------------
+// Values
+// ---------------------------------------------------------------------------
+
+pub typedef enum { TOML_STRING, TOML_INTEGER, TOML_FLOAT, TOML_BOOLEAN, TOML_DATETIME, TOML_ARRAY, TOML_TABLE } TomlKind;
+
+// How a table or an array came to be, which decides what a later line of the
+// document may still do with it.
+pub typedef enum {
+    TOML_PLAIN,         // made by a program, or an array written in brackets
+    TOML_IMPLICIT,      // a table that only a longer header named so far: [a.b] makes `a`
+    TOML_HEADER,        // a table that a header defined: [a]
+    TOML_DOTTED,        // a table that a dotted key made: a.b = 1 makes `a`
+    TOML_INLINE,        // a table written in braces, which is complete
+    TOML_TABLES,        // an array of tables: [[a]]
+} TomlOrigin;
+
+// An offset date-time, a local date-time, a local date or a local time
+pub typedef struct {
+    int year; int month; int day;
+    int hour; int minute; int second; int nanosecond;
+    int has_date; int has_time; int has_offset;
+    int offset;         // minutes east of UTC
+} TomlDateTime;
+
+pub typedef struct TomlValue TomlValue;
+
+pub struct TomlValue {
+    TomlKind kind;
+    char* string;       // a string can hold any character, so it has a length
+    int length;
+    long long integer;
+    double number;
+    int boolean;
+    TomlDateTime datetime;
+    Array<TomlValue*> items;    // the elements of an array, or the values of a table...
+    Array<char*> keys;          // ...under these keys, in the order they were added
+    TomlOrigin origin;
+};
+
+pub typedef struct {
+    int line;
+    int column;
+    char message[160];
+} TomlError;
+
+static void* toml_alloc(size_t count, size_t size) {
+    void* memory = calloc(count ? count : 1, size ? size : 1);
+    if (!memory) {
+        fputs("toml: out of memory\n", stderr);
+        exit(1);
+    }
+    return memory;
+}
+
+// Text is built in an array of characters.
+static void buffer_put(Array<char>* b, char ch) {
+    b.push(ch);
+}
+
+static void buffer_puts(Array<char>* b, const char* text) {
+    while (*text) b.push(*text++);
+}
+
+// Returns the text that was built, with a 0 behind it that is not part of it.
+static char* buffer_text(Array<char>* b) {
+    b.push(0);
+    b.pop();
+    return *b;
+}
+
+static TomlValue* toml_new(TomlKind kind) {
+    TomlValue* v = (TomlValue*)toml_alloc(1, sizeof(TomlValue));
+    v->kind = kind;
+    return v;
+}
+
+pub TomlValue* toml_string_of(const char* text, int length) {
+    TomlValue* v = toml_new(TOML_STRING);
+    v->string = (char*)toml_alloc((size_t)length + 1, 1);
+    if (length) memcpy(v->string, text, (size_t)length);
+    v->length = length;
+    return v;
+}
+
+pub TomlValue* toml_string(const char* text) {
+    return toml_string_of(text ? text : "", text ? (int)strlen(text) : 0);
+}
+
+pub TomlValue* toml_integer(long long integer) {
+    TomlValue* v = toml_new(TOML_INTEGER);
+    v->integer = integer;
+    return v;
+}
+
+pub TomlValue* toml_float(double number) {
+    TomlValue* v = toml_new(TOML_FLOAT);
+    v->number = number;
+    return v;
+}
+
+pub TomlValue* toml_boolean(int boolean) {
+    TomlValue* v = toml_new(TOML_BOOLEAN);
+    v->boolean = boolean != 0;
+    return v;
+}
+
+pub TomlValue* toml_datetime(TomlDateTime datetime) {
+    TomlValue* v = toml_new(TOML_DATETIME);
+    v->datetime = datetime;
+    return v;
+}
+
+pub TomlValue* toml_array(void) { return toml_new(TOML_ARRAY); }
+pub TomlValue* toml_table(void) { return toml_new(TOML_TABLE); }
+
+static void toml_add(TomlValue* v, const char* key, TomlValue* item) {
+    (&v->items).push(item);
+    if (!key) return;
+    char* copy = (char*)toml_alloc(strlen(key) + 1, 1);
+    strcpy(copy, key);
+    (&v->keys).push(copy);
+}
+
+static char* toml_write(TomlValue* table);
+
+// How many elements an array or a table has is value->items.count(), and
+// value->items[i] is one of them, with value->keys[i] as its key in a table.
+impl TomlValue* {
+    // Adds an element to an array.
+    pub void push(Self self, TomlValue* item) {
+        if (item) toml_add(self, 0, item);
+    }
+
+    // Returns the value a table has under a key, or 0 if it has none.
+    pub TomlValue* get(Self self, const char* key) {
+        if (!self || self->kind != TOML_TABLE) return 0;
+        for (size_t i = 0; i < self->items.count(); i++)
+            if (strcmp(self->keys[i], key) == 0) return self->items[i];
+        return 0;
+    }
+
+    // Gives a table a value under a key. Without a value nothing is set, so
+    // something that has nothing to say can leave its key out.
+    pub void set(Self self, const char* key, TomlValue* value) {
+        if (!value) return;
+        for (size_t i = 0; i < self->items.count(); i++)
+            if (strcmp(self->keys[i], key) == 0) {
+                self->items[i] = value;
+                return;
+            }
+        toml_add(self, key, value);
+    }
+
+    // Returns a table written as a document.
+    pub char* write(Self self) {
+        return toml_write(self);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+enum {
+    TOML_DEPTH = 128,           // how deep arrays and inline tables can be nested
+    TOML_PARTS = 64,            // how many parts a dotted key can have
+};
+
+typedef struct {
+    const char* p;              // where the parser is
+    const char* line_start;
+    int line;
+    int failed;
+    TomlError* error;
+} TomlParser;
+
+static int toml_fail(TomlParser* t, const char* message) {
+    if (!t->failed && t->error) {
+        t->error->line = t->line;
+        t->error->column = (int)(t->p - t->line_start) + 1;
+        snprintf(t->error->message, sizeof t->error->message, "%s", message);
+    }
+    t->failed = 1;
+    return 0;
+}
+
+static int toml_is_digit(char c) { return c >= '0' && c <= '9'; }
+static int toml_is_bare(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || toml_is_digit(c) || c == '_' || c == '-';
+}
+
+static int toml_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// A control character that may not stand in a comment or in a string
+static int toml_is_control(char c) {
+    unsigned char u = (unsigned char)c;
+    return (u < 0x20 && u != '\t') || u == 0x7f;
+}
+
+// Returns whether text is valid UTF-8: no stray or overlong sequences, no
+// surrogates, nothing above U+10FFFF.
+static int toml_utf8_valid(const char* text) {
+    const unsigned char* s = (const unsigned char*)text;
+    while (*s) {
+        int more = *s < 0x80 ? 0 : (*s & 0xe0) == 0xc0 ? 1 : (*s & 0xf0) == 0xe0 ? 2 : (*s & 0xf8) == 0xf0 ? 3 : -1;
+        long cp = more == 0 ? *s : more == 1 ? *s & 0x1f : more == 2 ? *s & 0x0f : *s & 0x07;
+        if (more < 0) return 0;
+        s++;
+        for (int i = 0; i < more; i++) {
+            if ((*s & 0xc0) != 0x80) return 0;
+            cp = (cp << 6) | (*s++ & 0x3f);
+        }
+        if ((more == 1 && cp < 0x80) || (more == 2 && cp < 0x800) || (more == 3 && cp < 0x10000)) return 0;
+        if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return 0;
+    }
+    return 1;
+}
+
+static void toml_utf8_put(Array<char>* b, long cp) {
+    if (cp < 0x80) {
+        buffer_put(b, (char)cp);
+    } else if (cp < 0x800) {
+        buffer_put(b, (char)(0xc0 | (cp >> 6)));
+        buffer_put(b, (char)(0x80 | (cp & 0x3f)));
+    } else if (cp < 0x10000) {
+        buffer_put(b, (char)(0xe0 | (cp >> 12)));
+        buffer_put(b, (char)(0x80 | ((cp >> 6) & 0x3f)));
+        buffer_put(b, (char)(0x80 | (cp & 0x3f)));
+    } else {
+        buffer_put(b, (char)(0xf0 | (cp >> 18)));
+        buffer_put(b, (char)(0x80 | ((cp >> 12) & 0x3f)));
+        buffer_put(b, (char)(0x80 | ((cp >> 6) & 0x3f)));
+        buffer_put(b, (char)(0x80 | (cp & 0x3f)));
+    }
+}
+
+static void toml_skip_space(TomlParser* t) {
+    while (*t->p == ' ' || *t->p == '\t') t->p++;
+}
+
+// Takes a newline, which is a line feed with or without a carriage return
+// before it, and returns whether there was one.
+static int toml_newline(TomlParser* t) {
+    if (*t->p == '\r' && t->p[1] == '\n') t->p++;
+    if (*t->p != '\n') return 0;
+    t->p++;
+    t->line++;
+    t->line_start = t->p;
+    return 1;
+}
+
+// Takes a comment, if there is one, up to the end of its line.
+static void toml_comment(TomlParser* t) {
+    if (*t->p != '#') return;
+    while (*t->p && *t->p != '\n' && !(*t->p == '\r' && t->p[1] == '\n')) {
+        if (toml_is_control(*t->p)) {
+            toml_fail(t, "a control character in a comment");
+            return;
+        }
+        t->p++;
+    }
+}
+
+// Takes what may follow a value on its line: spaces and a comment.
+static void toml_line_end(TomlParser* t) {
+    toml_skip_space(t);
+    toml_comment(t);
+    if (!t->failed && *t->p && !toml_newline(t)) toml_fail(t, "expected the end of the line");
+}
+
+// Takes the spaces, comments and newlines that may stand between the values
+// of an array or of an inline table.
+static void toml_skip_blank(TomlParser* t) {
+    while (!t->failed) {
+        toml_skip_space(t);
+        toml_comment(t);
+        if (!toml_newline(t)) break;
+    }
+}
+
+// Takes what follows the backslash of an escape sequence.
+static void toml_escape(TomlParser* t, Array<char>* b) {
+    char c = *t->p++;
+    int digits = c == 'x' ? 2 : c == 'u' ? 4 : c == 'U' ? 8 : 0;
+    long cp = 0;
+    switch (c) {
+        case 'b': buffer_put(b, '\b'); return;
+        case 't': buffer_put(b, '\t'); return;
+        case 'n': buffer_put(b, '\n'); return;
+        case 'f': buffer_put(b, '\f'); return;
+        case 'r': buffer_put(b, '\r'); return;
+        case 'e': buffer_put(b, 27); return;
+        case '"': buffer_put(b, '"'); return;
+        case '\\': buffer_put(b, '\\'); return;
+        default: break;
+    }
+    if (!digits) {
+        t->p--;
+        toml_fail(t, "an escape sequence that TOML does not have");
+        return;
+    }
+    for (int i = 0; i < digits; i++) {
+        if (toml_hex(*t->p) < 0) {
+            toml_fail(t, "an escape sequence with too few hexadecimal digits");
+            return;
+        }
+        cp = cp * 16 + toml_hex(*t->p++);
+    }
+    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+        toml_fail(t, "an escape sequence that is not a Unicode scalar value");
+        return;
+    }
+    toml_utf8_put(b, cp);
+}
+
+// Takes a string of any of the four kinds: basic or literal, on one line or
+// on several. The parser is at its opening quote. A key cannot be a string
+// on several lines.
+static char* toml_text(TomlParser* t, int* length, int is_key) {
+    Array<char> b = 0;
+    char quote = *t->p;
+    int basic = quote == '"';
+    int multi = t->p[1] == quote && t->p[2] == quote;
+    if (multi && is_key) {
+        toml_fail(t, "a key cannot be a string on several lines");
+        return 0;
+    }
+    t->p += multi ? 3 : 1;
+    if (multi) toml_newline(t);     // a newline directly behind the opening quotes is not part of the string
+    while (!t->failed) {
+        char c = *t->p;
+        if (c == quote) {
+            // on several lines one or two quotes are text, also directly before the closing three
+            int run = 1;
+            while (multi && run < 5 && t->p[run] == quote) run++;
+            if (!multi || run >= 3) {
+                for (int i = 0; multi && i < run - 3; i++) buffer_put(&b, quote);
+                t->p += multi ? run : 1;
+                break;
+            }
+            for (int i = 0; i < run; i++) buffer_put(&b, quote);
+            t->p += run;
+        } else if (c == '\\' && basic) {
+            // a backslash that ends a line takes the line break and the blank space behind it away
+            const char* q = t->p + 1;
+            while (*q == ' ' || *q == '\t') q++;
+            if (multi && (*q == '\n' || (*q == '\r' && q[1] == '\n'))) {
+                t->p = q;
+                while (*t->p == ' ' || *t->p == '\t' || toml_newline(t)) {
+                    if (*t->p == ' ' || *t->p == '\t') t->p++;
+                }
+            } else {
+                t->p++;
+                toml_escape(t, &b);
+            }
+        } else if (multi && (c == '\n' || (c == '\r' && t->p[1] == '\n'))) {
+            toml_newline(t);
+            buffer_put(&b, '\n');
+        } else if (!c || c == '\n') {
+            toml_fail(t, "a string that is not closed");
+        } else if (toml_is_control(c)) {
+            toml_fail(t, "a control character in a string");
+        } else {
+            buffer_put(&b, c);
+            t->p++;
+        }
+    }
+    if (length) *length = (int)b.count();
+    return buffer_text(&b);
+}
+
+// Takes a key, which can have several parts with dots between them, and
+// returns how many parts it has.
+static int toml_key(TomlParser* t, char** parts) {
+    int count = 0;
+    while (!t->failed) {
+        toml_skip_space(t);
+        if (count == TOML_PARTS) return toml_fail(t, "a key with too many parts");
+        if (*t->p == '"' || *t->p == '\'') {
+            // A key ends at its first 0, as text in C does. A key that has the
+            // character U+0000 in it holds the bytes C0 80 in its place, which
+            // never stand in valid UTF-8.
+            Array<char> b = 0;
+            int length = 0;
+            char* text = toml_text(t, &length, 1);
+            for (int i = 0; i < length; i++) {
+                if (text[i]) buffer_put(&b, text[i]);
+                else buffer_puts(&b, "\xC0\x80");
+            }
+            parts[count++] = buffer_text(&b);
+        } else {
+            Array<char> b = 0;
+            while (toml_is_bare(*t->p)) buffer_put(&b, *t->p++);
+            if (!b.count()) return toml_fail(t, "expected a key");
+            parts[count++] = buffer_text(&b);
+        }
+        toml_skip_space(t);
+        if (*t->p != '.') break;
+        t->p++;
+    }
+    return count;
+}
+
+// Reads digits with single underscores between them, as TOML writes
+// numbers, into `out`, and returns how many digits there were. Returns 0 if
+// an underscore does not have a digit on each side.
+static int toml_digits(const char* s, int* at, Array<char>* out, int base) {
+    int count = 0;
+    for (;; (*at)++) {
+        char c = s[*at];
+        int digit = toml_hex(c);
+        if (c == '_') {
+            int next = toml_hex(s[*at + 1]);
+            if (!count || next < 0 || next >= base) return 0;
+            continue;
+        }
+        if (digit < 0 || digit >= base) break;
+        buffer_put(out, c);
+        count++;
+    }
+    return count;
+}
+
+// Reads a number as it stands in `s`: an integer or a float.
+static TomlValue* toml_number(TomlParser* t, const char* s) {
+    Array<char> b = 0;
+    int at = 0, negative = s[0] == '-', is_float = 0;
+    int base = s[0] == '0' && s[1] == 'x' ? 16 : s[0] == '0' && s[1] == 'o' ? 8 : s[0] == '0' && s[1] == 'b' ? 2 : 10;
+    if (s[0] == '+' || s[0] == '-') at++;
+    if (strcmp(s + at, "inf") == 0) return toml_float(negative ? -strtod("inf", 0) : strtod("inf", 0));
+    if (strcmp(s + at, "nan") == 0) return toml_float(strtod("nan", 0));
+    if (negative) buffer_put(&b, '-');
+    if (base != 10) at = 2;
+    int start = at, digits = toml_digits(s, &at, &b, base);
+    if (!digits || (base == 10 && digits > 1 && s[start] == '0')) {
+        toml_fail(t, base == 10 && digits > 1 ? "a number cannot have leading zeros" : "this is not a value");
+        return 0;
+    }
+    if (base == 10 && s[at] == '.') {
+        buffer_put(&b, s[at++]);
+        is_float = 1;
+        if (!toml_digits(s, &at, &b, 10)) {
+            toml_fail(t, "a float needs digits on both sides of its point");
+            return 0;
+        }
+    }
+    if (base == 10 && (s[at] == 'e' || s[at] == 'E')) {
+        buffer_put(&b, s[at++]);
+        is_float = 1;
+        if (s[at] == '+' || s[at] == '-') buffer_put(&b, s[at++]);
+        if (!toml_digits(s, &at, &b, 10)) {
+            toml_fail(t, "a float needs digits in its exponent");
+            return 0;
+        }
+    }
+    if (s[at]) {
+        toml_fail(t, "this is not a value");
+        return 0;
+    }
+    if (is_float) return toml_float(strtod(buffer_text(&b), 0));
+
+    // an integer has to fit in 64 bits
+    unsigned long long limit = negative ? 9223372036854775808ULL : 9223372036854775807ULL, value = 0;
+    for (const char* d = buffer_text(&b) + negative; *d; d++) {
+        unsigned long long digit = (unsigned long long)toml_hex(*d);
+        if (value > (limit - digit) / (unsigned long long)base) {
+            toml_fail(t, "an integer that does not fit in 64 bits");
+            return 0;
+        }
+        value = value * (unsigned long long)base + digit;
+    }
+    return toml_integer(negative ? (long long)(0 - value) : (long long)value);
+}
+
+// Reads exactly two digits.
+static int toml_two(const char* s, int* at, int* out) {
+    if (!toml_is_digit(s[*at]) || !toml_is_digit(s[*at + 1])) return 0;
+    *out = (s[*at] - '0') * 10 + (s[*at + 1] - '0');
+    *at += 2;
+    return 1;
+}
+
+// Reads a date, a time, or a date-time with or without an offset.
+static TomlValue* toml_date(TomlParser* t, const char* s) {
+    static const int days[] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    TomlDateTime d = {0};
+    int at = 0, high = 0, low = 0, ok = 1;
+    if (s[4] == '-') {
+        d.has_date = 1;
+        ok = toml_two(s, &at, &high) && toml_two(s, &at, &low) && s[at++] == '-' && toml_two(s, &at, &d.month) &&
+             s[at++] == '-' && toml_two(s, &at, &d.day);
+        d.year = high * 100 + low;
+        int leap = (d.year % 4 == 0 && d.year % 100 != 0) || d.year % 400 == 0;
+        ok = ok && d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= days[d.month - 1] && (d.month != 2 || d.day < 29 || leap);
+        if (ok && (s[at] == 'T' || s[at] == 't' || s[at] == ' ')) {
+            at++;
+            d.has_time = 1;
+        }
+    } else {
+        d.has_time = 1;
+    }
+    if (ok && d.has_time) {
+        // the seconds can be left out
+        ok = toml_two(s, &at, &d.hour) && s[at++] == ':' && toml_two(s, &at, &d.minute) && d.hour < 24 && d.minute < 60;
+        if (ok && s[at] == ':') {
+            at++;
+            ok = toml_two(s, &at, &d.second) && d.second <= 60;
+            if (ok && s[at] == '.') {
+                // digits beyond nanoseconds are cut off
+                int digits = 0;
+                for (at++; toml_is_digit(s[at]); at++, digits++)
+                    if (digits < 9) d.nanosecond = d.nanosecond * 10 + (s[at] - '0');
+                ok = digits > 0;
+                for (; digits < 9; digits++) d.nanosecond *= 10;
+            }
+        }
+        if (ok && d.has_date && (s[at] == 'Z' || s[at] == 'z')) {
+            at++;
+            d.has_offset = 1;
+        } else if (ok && d.has_date && (s[at] == '+' || s[at] == '-')) {
+            int sign = s[at++] == '-' ? -1 : 1;
+            ok = toml_two(s, &at, &high) && s[at++] == ':' && toml_two(s, &at, &low) && high < 24 && low < 60;
+            d.has_offset = 1;
+            d.offset = sign * (high * 60 + low);
+        }
+    }
+    if (!ok || s[at]) {
+        toml_fail(t, "this is not a date or a time");
+        return 0;
+    }
+    return toml_datetime(d);
+}
+
+static TomlValue* toml_value(TomlParser* t, int depth);
+static int toml_assign(TomlParser* t, TomlValue* table, char** parts, int count, TomlValue* value);
+
+// Takes a value that is not a string, an array or a table: a boolean, a
+// number, a date or a time. It ends where a value can end.
+static TomlValue* toml_scalar(TomlParser* t) {
+    char s[96];
+    int n = 0;
+    const char* start = t->p;
+    const char* p = t->p;
+    while (*p && *p != ' ' && *p != '\t' && *p != ',' && *p != ']' && *p != '}' && *p != '#' && *p != '\n' && *p != '\r') p++;
+    // a date and a time can have one space between them
+    if (p - start == 10 && start[4] == '-' && *p == ' ' && toml_is_digit(p[1]) && toml_is_digit(p[2]) && p[3] == ':') {
+        p++;
+        while (*p && *p != ' ' && *p != '\t' && *p != ',' && *p != ']' && *p != '}' && *p != '#' && *p != '\n' && *p != '\r') p++;
+    }
+    if (p == start || p - start >= (long)sizeof s) {
+        toml_fail(t, "expected a value");
+        return 0;
+    }
+    for (; start + n < p; n++) s[n] = start[n];
+    s[n] = 0;
+    TomlValue* v = strcmp(s, "true") == 0 ? toml_boolean(1) : strcmp(s, "false") == 0 ? toml_boolean(0) :
+                   n > 4 && toml_is_digit(s[0]) && toml_is_digit(s[1]) && (s[2] == ':' || (toml_is_digit(s[2]) && toml_is_digit(s[3]) && s[4] == '-'))
+                       ? toml_date(t, s) : toml_number(t, s);
+    if (v) t->p = p;
+    return v;
+}
+
+// Takes a value.
+static TomlValue* toml_value(TomlParser* t, int depth) {
+    char* parts[TOML_PARTS];
+    if (depth > TOML_DEPTH) {
+        toml_fail(t, "arrays and inline tables are nested too deeply");
+        return 0;
+    }
+    if (*t->p == '"' || *t->p == '\'') {
+        int length = 0;
+        char* text = toml_text(t, &length, 0);
+        return t->failed ? 0 : toml_string_of(text, length);
+    }
+    if (*t->p != '[' && *t->p != '{') return toml_scalar(t);
+
+    // An array and an inline table can run over several lines, with comments,
+    // and can have a comma behind their last element.
+    int is_table = *t->p == '{';
+    char close = is_table ? '}' : ']';
+    TomlValue* v = is_table ? toml_table() : toml_array();
+    t->p++;
+    toml_skip_blank(t);
+    while (!t->failed && *t->p != close) {
+        if (is_table) {
+            int count = toml_key(t, parts);
+            if (!t->failed && *t->p != '=') toml_fail(t, "expected '=' after a key");
+            if (t->failed) break;
+            t->p++;
+            toml_skip_space(t);
+            TomlValue* item = toml_value(t, depth + 1);
+            if (item) toml_assign(t, v, parts, count, item);
+        } else {
+            TomlValue* item = toml_value(t, depth + 1);
+            if (item) toml_add(v, 0, item);
+        }
+        toml_skip_blank(t);
+        if (t->failed || *t->p != ',') break;
+        t->p++;
+        toml_skip_blank(t);
+    }
+    if (!t->failed && *t->p != close) toml_fail(t, is_table ? "expected ',' or '}' in an inline table" : "expected ',' or ']' in an array");
+    if (t->failed) return 0;
+    t->p++;
+    if (is_table) v->origin = TOML_INLINE;
+    return v;
+}
+
+// Gives a table the value of a key/value pair. A key with dots goes through
+// tables, which it makes where they do not exist. It can only go through
+// tables that dotted keys made, or that nothing has defined yet.
+static int toml_assign(TomlParser* t, TomlValue* table, char** parts, int count, TomlValue* value) {
+    for (int i = 0; i < count - 1; i++) {
+        TomlValue* next = table.get(parts[i]);
+        if (!next) {
+            next = toml_table();
+            toml_add(table, parts[i], next);
+        } else if (next->kind != TOML_TABLE || (next->origin != TOML_DOTTED && next->origin != TOML_IMPLICIT)) {
+            return toml_fail(t, next->kind == TOML_TABLE ? "a dotted key cannot add to a table that is already defined"
+                                                         : "a dotted key goes through something that is not a table");
+        }
+        next->origin = TOML_DOTTED;
+        table = next;
+    }
+    if (table.get(parts[count - 1])) return toml_fail(t, "this key is already defined");
+    toml_add(table, parts[count - 1], value);
+    return 1;
+}
+
+// Returns the table that a header selects: [a.b] defines a table, and
+// [[a.b]] adds one to an array of tables.
+static TomlValue* toml_header(TomlParser* t, TomlValue* root, char** parts, int count, int is_array) {
+    TomlValue* table = root;
+    for (int i = 0; i < count; i++) {
+        TomlValue* next = table.get(parts[i]);
+        int last = i == count - 1;
+        if (last && is_array) {
+            // every [[name]] is one more table in the array
+            if (next && (next->kind != TOML_ARRAY || next->origin != TOML_TABLES)) {
+                toml_fail(t, next->kind == TOML_ARRAY ? "an array that was written in brackets cannot get tables added"
+                                                      : "this name is already defined, and not as an array of tables");
+                return 0;
+            }
+            if (!next) {
+                next = toml_array();
+                next->origin = TOML_TABLES;
+                toml_add(table, parts[i], next);
+            }
+            table = toml_table();
+            table->origin = TOML_HEADER;
+            toml_add(next, 0, table);
+            return table;
+        }
+        if (!next) {
+            next = toml_table();
+            next->origin = last ? TOML_HEADER : TOML_IMPLICIT;
+            toml_add(table, parts[i], next);
+        } else if (next->kind == TOML_ARRAY && next->origin == TOML_TABLES && !last) {
+            next = next->items[next->items.count() - 1];    // the table that was added to the array last
+        } else if (next->kind != TOML_TABLE || next->origin == TOML_INLINE) {
+            toml_fail(t, next->kind == TOML_TABLE ? "an inline table cannot be added to" : "this name is already defined, and not as a table");
+            return 0;
+        } else if (last && next->origin != TOML_IMPLICIT) {
+            toml_fail(t, "this table is already defined");
+            return 0;
+        } else if (last) {
+            next->origin = TOML_HEADER;
+        }
+        table = next;
+    }
+    return table;
+}
+
+// Parses a document of a given length, which has a 0 behind its last
+// character, and returns its root table. If the document is not valid,
+// returns 0, and `error` says what is wrong and where.
+pub TomlValue* toml_parse_text(const char* text, size_t length, TomlError* error) {
+    TomlParser parser = { text, text, 1, 0, error };
+    TomlParser* t = &parser;
+    TomlValue* root = toml_table();
+    TomlValue* current = root;
+    char* parts[TOML_PARTS];
+    if (strlen(text) != length) toml_fail(t, "the document has a character with the value 0 in it");
+    if (!toml_utf8_valid(text)) toml_fail(t, "the document is not valid UTF-8");
+    while (!t->failed) {
+        toml_skip_space(t);
+        if (!*t->p) break;
+        if (toml_newline(t)) continue;
+        if (*t->p == '#') {
+            toml_line_end(t);
+        } else if (*t->p == '[') {
+            int is_array = t->p[1] == '[';
+            t->p += is_array ? 2 : 1;
+            int count = toml_key(t, parts);
+            if (t->failed) break;
+            if (*t->p != ']' || (is_array && t->p[1] != ']')) {
+                toml_fail(t, is_array ? "expected ']]' after the name of an array of tables" : "expected ']' after the name of a table");
+                break;
+            }
+            t->p += is_array ? 2 : 1;
+            current = toml_header(t, root, parts, count, is_array);
+            toml_line_end(t);
+        } else {
+            int count = toml_key(t, parts);
+            if (t->failed) break;
+            if (*t->p != '=') {
+                toml_fail(t, "expected '=' after a key");
+                break;
+            }
+            t->p++;
+            toml_skip_space(t);
+            TomlValue* value = toml_value(t, 0);
+            if (value && toml_assign(t, current, parts, count, value)) toml_line_end(t);
+        }
+    }
+    return t->failed ? 0 : root;
+}
+
+pub TomlValue* toml_parse(const char* text, TomlError* error) {
+    return toml_parse_text(text, strlen(text), error);
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+// Writes a string between quotes, with what cannot stand there escaped.
+static void toml_write_string(Array<char>* b, const char* s, int length) {
+    char hex[16];
+    buffer_put(b, '"');
+    for (int i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == 0xC0 && (unsigned char)s[i + 1] == 0x80) {
+            // the character U+0000 in a key
+            buffer_puts(b, "\\u0000");
+            i++;
+        }
+        else if (c == '"') buffer_puts(b, "\\\"");
+        else if (c == '\\') buffer_puts(b, "\\\\");
+        else if (c == '\n') buffer_puts(b, "\\n");
+        else if (c == '\t') buffer_puts(b, "\\t");
+        else if (c == '\r') buffer_puts(b, "\\r");
+        else if (c < 0x20 || c == 0x7f) {
+            snprintf(hex, sizeof hex, "\\u%04X", c);
+            buffer_puts(b, hex);
+        } else {
+            buffer_put(b, (char)c);
+        }
+    }
+    buffer_put(b, '"');
+}
+
+// Writes a key, bare if it can be.
+static void toml_write_key(Array<char>* b, const char* key) {
+    int bare = *key != 0;
+    for (const char* k = key; *k; k++) bare = bare && toml_is_bare(*k);
+    if (bare) buffer_puts(b, key);
+    else toml_write_string(b, key, (int)strlen(key));
+}
+
+// Returns whether a value is written as [[name]] sections: an array that
+// has elements, all of them tables.
+static int toml_is_tables(TomlValue* v) {
+    if (v->kind != TOML_ARRAY || !v->items.count()) return 0;
+    for (size_t i = 0; i < v->items.count(); i++)
+        if (v->items[i]->kind != TOML_TABLE) return 0;
+    return 1;
+}
+
+// Writes a value as it stands behind a key or in an array.
+static void toml_write_value(Array<char>* b, TomlValue* v) {
+    char text[64];
+    TomlDateTime d = v->datetime;
+    switch (v->kind) {
+        case TOML_STRING:
+            toml_write_string(b, v->string, v->length);
+            break;
+        case TOML_INTEGER:
+            snprintf(text, sizeof text, "%lld", v->integer);
+            buffer_puts(b, text);
+            break;
+        case TOML_FLOAT:
+            if (v->number != v->number) {
+                buffer_puts(b, "nan");
+            } else if (v->number - v->number != 0) {
+                buffer_puts(b, v->number < 0 ? "-inf" : "inf");
+            } else {
+                // the shortest spelling that reads back as the same number
+                for (int digits = 1; digits <= 17; digits++) {
+                    snprintf(text, sizeof text, "%.*g", digits, v->number);
+                    if (strtod(text, 0) == v->number) break;
+                }
+                buffer_puts(b, text);
+                if (!strpbrk(text, ".e")) buffer_puts(b, ".0");
+            }
+            break;
+        case TOML_BOOLEAN:
+            buffer_puts(b, v->boolean ? "true" : "false");
+            break;
+        case TOML_DATETIME:
+            if (d.has_date) {
+                snprintf(text, sizeof text, "%04d-%02d-%02d", d.year, d.month, d.day);
+                buffer_puts(b, text);
+            }
+            if (d.has_date && d.has_time) buffer_put(b, 'T');
+            if (d.has_time) {
+                snprintf(text, sizeof text, "%02d:%02d:%02d", d.hour, d.minute, d.second);
+                buffer_puts(b, text);
+            }
+            if (d.has_time && d.nanosecond) {
+                snprintf(text, sizeof text, ".%09d", d.nanosecond);
+                for (int end = 9; end > 1 && text[end] == '0'; end--) text[end] = 0;
+                buffer_puts(b, text);
+            }
+            if (d.has_offset && !d.offset) buffer_put(b, 'Z');
+            if (d.has_offset && d.offset) {
+                int minutes = d.offset < 0 ? -d.offset : d.offset;
+                snprintf(text, sizeof text, "%c%02d:%02d", d.offset < 0 ? '-' : '+', minutes / 60, minutes % 60);
+                buffer_puts(b, text);
+            }
+            break;
+        case TOML_ARRAY:
+            buffer_put(b, '[');
+            for (size_t i = 0; i < v->items.count(); i++) {
+                if (i) buffer_puts(b, ", ");
+                toml_write_value(b, v->items[i]);
+            }
+            buffer_put(b, ']');
+            break;
+        case TOML_TABLE:
+            buffer_put(b, '{');
+            for (size_t i = 0; i < v->items.count(); i++) {
+                buffer_puts(b, i ? ", " : " ");
+                toml_write_key(b, v->keys[i]);
+                buffer_puts(b, " = ");
+                toml_write_value(b, v->items[i]);
+            }
+            buffer_puts(b, v->items.count() ? " }" : "}");
+            break;
+    }
+}
+
+// Writes a table as lines of a document: first its plain values, then each
+// table in it under a [header], then each array of tables as [[sections]].
+static void toml_write_table(Array<char>* b, TomlValue* table, const char* path) {
+    for (size_t i = 0; i < table->items.count(); i++) {
+        TomlValue* v = table->items[i];
+        if (v->kind == TOML_TABLE || toml_is_tables(v)) continue;
+        toml_write_key(b, table->keys[i]);
+        buffer_puts(b, " = ");
+        toml_write_value(b, v);
+        buffer_put(b, '\n');
+    }
+    for (size_t i = 0; i < table->items.count(); i++) {
+        TomlValue* v = table->items[i];
+        int sections = toml_is_tables(v);
+        Array<char> name = 0;
+        if (v->kind != TOML_TABLE && !sections) continue;
+        if (*path) {
+            buffer_puts(&name, path);
+            buffer_put(&name, '.');
+        }
+        toml_write_key(&name, table->keys[i]);
+        for (size_t k = 0; k < (sections ? v->items.count() : 1); k++) {
+            TomlValue* inner = sections ? v->items[k] : v;
+            // a table that only holds tables needs no header of its own
+            int plain = inner->items.count() == 0 || sections;
+            for (size_t m = 0; m < inner->items.count(); m++)
+                plain = plain || (inner->items[m]->kind != TOML_TABLE && !toml_is_tables(inner->items[m]));
+            if (plain) {
+                if ((*b).count()) buffer_put(b, '\n');
+                buffer_puts(b, sections ? "[[" : "[");
+                buffer_puts(b, buffer_text(&name));
+                buffer_puts(b, sections ? "]]\n" : "]\n");
+            }
+            toml_write_table(b, inner, buffer_text(&name));
+        }
+    }
+}
+
+static char* toml_write(TomlValue* table) {
+    Array<char> b = 0;
+    toml_write_table(&b, table, "");
+    return buffer_text(&b);
+}
+
+// ---------------------------------------------------------------------------
+// Structs
+// ---------------------------------------------------------------------------
+
+// What can be written as TOML. A value that has nothing to write returns 0,
+// and its key is left out.
+pub trait ToToml { TomlValue* to_toml(Self self); }
+
+// What can be read from TOML. It is implemented for the pointer to what is
+// read: (&config).from_toml(table). Returns whether the value fitted; if it
+// did not, toml_mismatch says what was expected and where.
+pub trait FromToml { int from_toml(Self self, TomlValue* value); }
+
+pub char toml_mismatch[240];
+
+static const char* toml_kind_name(TomlKind kind) {
+    switch (kind) {
+        case TOML_STRING: return "a string";
+        case TOML_INTEGER: return "an integer";
+        case TOML_FLOAT: return "a float";
+        case TOML_BOOLEAN: return "a boolean";
+        case TOML_DATETIME: return "a date or time";
+        case TOML_ARRAY: return "an array";
+        default: return "a table";
+    }
+}
+
+// Returns whether a value is of the kind that is needed, and notes what is
+// wrong if it is not.
+pub int toml_expect(TomlValue* value, TomlKind kind) {
+    if (value->kind == kind) return 1;
+    snprintf(toml_mismatch, sizeof toml_mismatch, ": expected %s, found %s", toml_kind_name(kind), toml_kind_name(value->kind));
+    return 0;
+}
+
+pub int toml_refuse(const char* why) {
+    snprintf(toml_mismatch, sizeof toml_mismatch, ": %s", why);
+    return 0;
+}
+
+// Puts the key that a mismatch was found under in front of what is noted,
+// so that in the end the whole path to it is there. Returns 0.
+pub int toml_inside(const char* key, int index) {
+    char rest[240];
+    snprintf(rest, sizeof rest, "%s", toml_mismatch);
+    if (key) snprintf(toml_mismatch, sizeof toml_mismatch, "%s%s%s", key, *rest == ':' || *rest == '[' ? "" : ".", rest);
+    else snprintf(toml_mismatch, sizeof toml_mismatch, "[%d]%s%s", index, *rest == ':' || *rest == '[' ? "" : ".", rest);
+    return 0;
+}
+
+pub int toml_string_is(TomlValue* value, const char* text) {
+    return strcmp(value->string, text) == 0;
+}
+
+// A date or time is a value of its own, and a TomlValue* takes what is there.
+impl ToToml for TomlDateTime { TomlValue* to_toml(Self self) { return toml_datetime(self); } }
+impl FromToml for TomlDateTime* {
+    int from_toml(Self self, TomlValue* value) {
+        if (!toml_expect(value, TOML_DATETIME)) return 0;
+        *self = value->datetime;
+        return 1;
+    }
+}
+impl ToToml for TomlValue* { TomlValue* to_toml(Self self) { return self; } }
+impl FromToml for TomlValue** {
+    int from_toml(Self self, TomlValue* value) {
+        *self = value;
+        return 1;
+    }
+}
+
+int @same(const char* a, const char* b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+// Emits ToToml for T and FromToml for T*, unless T has them already, and
+// does the same for every type that T is made of. What it emits depends on
+// what sort of type T is.
+//
+// What is emitted belongs to the namespace that uses this, and reads names
+// there. So it reaches everything of this namespace through `std::`.
+pub void @derive_toml<T>() {
+    #include <stddef.h>
+    import builtin;
+    import std;
+
+    if (@implements<T, ToToml>()) return;
+    int kind = @kind<T>();
+
+    if (kind == builtin::FieldKind::FIELD_BOOL) {
+        @emit impl std::ToToml for T { std::TomlValue* to_toml(Self self) { return std::toml_boolean(self); } }
+        @emit impl std::FromToml for T* {
+            int from_toml(Self self, std::TomlValue* value) {
+                if (!std::toml_expect(value, std::TomlKind::TOML_BOOLEAN)) return 0;
+                *self = value->boolean;
+                return 1;
+            }
+        }
+        return;
+    }
+    if (kind >= builtin::FieldKind::FIELD_CHAR && kind <= builtin::FieldKind::FIELD_ULLONG) {
+        @emit impl std::ToToml for T { std::TomlValue* to_toml(Self self) { return std::toml_integer((long long)self); } }
+        @emit impl std::FromToml for T* {
+            int from_toml(Self self, std::TomlValue* value) {
+                if (!std::toml_expect(value, std::TomlKind::TOML_INTEGER)) return 0;
+                *self = (T)value->integer;
+                if ((long long)*self != value->integer) return std::toml_refuse("the integer does not fit in the member");
+                return 1;
+            }
+        }
+        return;
+    }
+    if (kind >= builtin::FieldKind::FIELD_FLOAT && kind <= builtin::FieldKind::FIELD_LDOUBLE) {
+        @emit impl std::ToToml for T { std::TomlValue* to_toml(Self self) { return std::toml_float((double)self); } }
+        @emit impl std::FromToml for T* {
+            int from_toml(Self self, std::TomlValue* value) {
+                // an integer is taken for a float as well
+                if (value->kind == std::TomlKind::TOML_INTEGER) {
+                    *self = (T)value->integer;
+                    return 1;
+                }
+                if (!std::toml_expect(value, std::TomlKind::TOML_FLOAT)) return 0;
+                *self = (T)value->number;
+                return 1;
+            }
+        }
+        return;
+    }
+    if (kind == builtin::FieldKind::FIELD_POINTER && @same(@name<T>(), "Array")) {
+        // an Array<E> is an array, of whatever E is
+        @Type element = @generics<T>()[0].type;
+        @emit impl std::ToToml for T {
+            std::TomlValue* to_toml(Self self) {
+                std::TomlValue* array = std::toml_array();
+                for (size_t i = 0; i < self.count(); i++) array.push(self[i].to_toml());
+                return array;
+            }
+        }
+        @emit impl std::FromToml for T* {
+            int from_toml(Self self, std::TomlValue* value) {
+                if (!std::toml_expect(value, std::TomlKind::TOML_ARRAY)) return 0;
+                self.resize(value->items.count());
+                for (size_t i = 0; i < value->items.count(); i++)
+                    if (!(&(*self)[i]).from_toml(value->items[i])) return std::toml_inside(0, (int)i);
+                return 1;
+            }
+        }
+        @derive_toml<element>();
+        return;
+    }
+    if (kind == builtin::FieldKind::FIELD_POINTER) {
+        // a pointer to characters is a string; any other pointer is left to fail where it is used
+        if (@kind<@pointee<T>()>() != builtin::FieldKind::FIELD_CHAR) return;
+        @emit impl std::ToToml for T { std::TomlValue* to_toml(Self self) { return self ? std::toml_string(self) : 0; } }
+        @emit impl std::FromToml for T* {
+            int from_toml(Self self, std::TomlValue* value) {
+                if (!std::toml_expect(value, std::TomlKind::TOML_STRING)) return 0;
+                *self = value->string;
+                return 1;
+            }
+        }
+        return;
+    }
+    if (kind == builtin::FieldKind::FIELD_ENUM) {
+        // an enum is written as the name of its enumerator
+        @emit impl std::ToToml for T {
+            std::TomlValue* to_toml(Self self) {
+                const builtin::@Enumerator all[] = @enumerators<T>();
+                for (@int i = 0; i < sizeof all / sizeof all[0]; i++)
+                    if (self == all[i].value) return std::toml_string(all[i].name);
+                return std::toml_integer((long long)self);
+            }
+        }
+        @emit impl std::FromToml for T* {
+            int from_toml(Self self, std::TomlValue* value) {
+                const builtin::@Enumerator all[] = @enumerators<T>();
+                if (!std::toml_expect(value, std::TomlKind::TOML_STRING)) return 0;
+                for (@int i = 0; i < sizeof all / sizeof all[0]; i++)
+                    if (std::toml_string_is(value, all[i].name)) {
+                        *self = all[i].value;
+                        return 1;
+                    }
+                return std::toml_refuse("the string is not the name of an enumerator");
+            }
+        }
+        return;
+    }
+    if (kind != builtin::FieldKind::FIELD_STRUCT) return;
+
+    // A struct is a table with a key for each member. A key that the table
+    // does not have leaves its member as it is.
+    @emit impl std::ToToml for T {
+        std::TomlValue* to_toml(Self self) {
+            std::TomlValue* table = std::toml_table();
+            for (@int i = 0; i < @count<T>(); i++) {
+                builtin::@Field f = @fields<T>()[i];
+                table.set(f.name, self.[f].to_toml());
+            }
+            return table;
+        }
+    }
+    @emit impl std::FromToml for T* {
+        int from_toml(Self self, std::TomlValue* value) {
+            if (!std::toml_expect(value, std::TomlKind::TOML_TABLE)) return 0;
+            for (@int i = 0; i < @count<T>(); i++) {
+                builtin::@Field f = @fields<T>()[i];
+                std::TomlValue* member = value.get(f.name);
+                if (member && !(&self->[f]).from_toml(member)) return std::toml_inside(f.name, 0);
+            }
+            return 1;
+        }
+    }
+
+    // emitted first, so a struct that holds an Array of itself ends
+    for (int i = 0; i < @count<T>(); i++)
+        @derive_toml<@fields<T>()[i].type>();
+}

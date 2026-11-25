@@ -1,0 +1,113 @@
+// An array that grows, and is used like any pointer.
+//
+//   import std;
+//
+//   std::Array<int> squares = 0;
+//   for (int i = 0; i < 10; i++) (&squares).push(i * i);
+//   for (size_t i = 0; i < squares.count(); i++) printf("%d\n", squares[i]);
+//   (&squares).free();
+//
+// An Array<T> is a T*: it points at the first element, and is indexed and
+// handed to C functions as such. How many elements there are, and for how
+// many there is capacity, is kept in memory directly in front of the first
+// element. An array without elements is a null pointer.
+//
+// What changes an array can move its elements, so it is a method of the
+// address of the array, and pointers into the array are not kept across it.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+pub typedef<T> T* Array<T>;
+
+// What stands in front of the first element. It is as large as the
+// strictest alignment asks for, so that the elements behind it are aligned.
+typedef struct {
+    size_t count;
+    size_t capacity;
+} ArrayHeader;
+
+static ArrayHeader* array_header(void* array) {
+    return (ArrayHeader*)array - 1;
+}
+
+// Makes an array hold `count` elements of `size` bytes each and returns
+// where its elements are then. New elements are zero.
+void* array_fit(void* array, size_t size, size_t count) {
+    ArrayHeader* header = array ? array_header(array) : 0;
+    size_t had = header ? header->count : 0, capacity = header ? header->capacity : 0;
+    if (count > capacity) {
+        capacity = capacity * 2 > count ? capacity * 2 : count < 8 ? 8 : count;
+        header = (ArrayHeader*)realloc(header, sizeof(ArrayHeader) + capacity * size);
+        if (!header) {
+            fputs("std: out of memory\n", stderr);
+            exit(1);
+        }
+        header->capacity = capacity;
+    }
+    if (!header) return 0;
+    if (count > had) memset((char*)(header + 1) + had * size, 0, (count - had) * size);
+    header->count = count;
+    return header + 1;
+}
+
+// What only looks at an array is a method of the array: xs.count()
+impl<T> Array<T> {
+    // Returns how many elements the array has.
+    pub size_t count(Self self) {
+        return self ? array_header(self)->count : 0;
+    }
+
+    // Returns how many elements the array can hold before it has to grow.
+    pub size_t capacity(Self self) {
+        return self ? array_header(self)->capacity : 0;
+    }
+}
+
+// What changes an array is a method of its address: (&xs).push(3)
+impl<T> Array<T>* {
+    // Adds an element at the end.
+    pub void push(Self self, T value) {
+        size_t count = (*self).count();
+        *self = (T*)array_fit(*self, sizeof(T), count + 1);
+        (*self)[count] = value;
+    }
+
+    // Adds an element that is zero at the end and returns where it is, to
+    // be filled in: (&points).add()->x = 1;
+    pub T* add(Self self) {
+        size_t count = (*self).count();
+        *self = (T*)array_fit(*self, sizeof(T), count + 1);
+        return *self + count;
+    }
+
+    // Takes the last element off the array, which has to have one, and returns it.
+    pub T pop(Self self) {
+        return (*self)[--array_header(*self)->count];
+    }
+
+    // Makes the array have exactly `count` elements. New ones are zero.
+    pub void resize(Self self, size_t count) {
+        *self = (T*)array_fit(*self, sizeof(T), count);
+    }
+
+    // Gives the array a capacity of at least `capacity` elements, without adding any.
+    pub void reserve(Self self, size_t capacity) {
+        size_t count = (*self).count();
+        if (capacity <= (*self).capacity()) return;
+        *self = (T*)array_fit(*self, sizeof(T), capacity);
+        array_header(*self)->count = count;
+    }
+
+    // Takes all elements off the array. Its capacity stays.
+    pub void clear(Self self) {
+        if (*self) array_header(*self)->count = 0;
+    }
+
+    // Gives the memory of the array back. It is then an array without elements.
+    pub void free(Self self) {
+        if (*self) free(array_header(*self));
+        *self = 0;
+    }
+}
