@@ -1,5 +1,5 @@
 #pragma once
-#include "reflection.h"
+#include "comptime.h"
 
 // Naming and assembly of the generated C.
 //

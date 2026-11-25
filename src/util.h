@@ -192,6 +192,7 @@ static inline void list_push(List* l, void* item) {
 #define TRY_MAX 64
 static jmp_buf* g_try_stack[TRY_MAX];
 static int g_try_depth;
+static jmp_buf* g_ct_quiet;     // comptime.h: while a function body is only tried, an error goes here unreported
 
 // An error ends the declaration, statement or function it is in, not the
 // compilation: `fatal` reports it and continues at the innermost recovery
@@ -223,6 +224,8 @@ static inline void errors_stop(void) {
 static inline _Noreturn void fatal(const char* file, Token tok, const char* fmt, ...) {
     if (g_try_depth > 0)
         longjmp(*g_try_stack[g_try_depth - 1], 1);
+    if (g_ct_quiet)
+        longjmp(*g_ct_quiet, 1);
     char text[2048];
     int n;
     if (file && tok.row)

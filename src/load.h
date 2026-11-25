@@ -129,6 +129,12 @@ static inline SrcFile* file_new(Module* m, const char* path) {
     return f;
 }
 
+// What compile-time code adds to namespaces and imports (comptime.h)
+static Module* ct_builtin_module(void);
+static Module* ct_import_find(SrcFile* f, const char* name);
+static void ct_prescan(SrcFile* f, Expr* def);
+static void ct_parse_ready(void);
+
 static inline Module* import_find(SrcFile* f, const char* name) {
     for (int i = 0; i < f->nimports; i++)
         if (strcmp(f->imports[i].name, name) == 0) return f->imports[i].mod;
@@ -164,6 +170,7 @@ static int env_lookup_type(void* env, const Token* segments, int count) {
     }
     if (count == 2) {
         Module* m = import_find(f, first);
+        if (!m) m = ct_import_find(f, first);
         return m && map_has(&m->typenames, token_name(segments[1], second, sizeof second));
     }
     return 0;
@@ -189,6 +196,7 @@ static int env_lookup_generic(void* env, const Token* segments, int count, int m
     if (count == 1) return map_has(&f->mod->generics, first);
     if (count == 2) {
         Module* m = import_find(f, first);
+        if (!m) m = ct_import_find(f, first);
         return m && map_has(&m->generics, token_name(segments[1], second, sizeof second));
     }
     return 0;
@@ -199,7 +207,6 @@ static int env_lookup_generic(void* env, const Token* segments, int count, int m
 // ---------------------------------------------------------------------------
 
 static void module_load(Module* m);
-static Module* reflect_module(void);
 
 static inline Module* module_new(const char* name) {
     Module* m = (Module*)xalloc(sizeof(Module));
@@ -223,8 +230,7 @@ static inline Module* module_for_import(SrcFile* from, Expr* import) {
     }
     Module* m = (Module*)map_get(&g_module_by_name, buf_str(&name));
     if (m) return m;
-
-    if (strcmp(buf_str(&name), "builtin") == 0) return reflect_module();
+    if (strcmp(buf_str(&name), "builtin") == 0) return ct_builtin_module();
 
     if (!is_directory(buf_str(&dir)))
         fatal(from->path, import->token, "cannot find namespace '%s': '%s' is not a directory",
@@ -296,6 +302,7 @@ static inline void file_prescan(SrcFile* f) {
                 break;
             case E_FUNCDEF:
                 if (d->generics) map_put(&f->mod->generics, tok_str(d->name), f);
+                ct_prescan(f, d);
                 break;
             case E_IMPL:
                 // the prescan leaves the names followed by `<` in the impl node
@@ -304,6 +311,9 @@ static inline void file_prescan(SrcFile* f) {
                 break;
             case E_GTYPEDEF:
                 map_put(&f->mod->typenames, tok_str(d->name), f);
+                break;
+            case E_GENERATOR:
+                ct_prescan(f, d);
                 break;
             case E_TRAIT:
                 for (size_t j = 0; j < d->blockstmt_size; j++) {
@@ -653,7 +663,10 @@ static inline void declare_impl(SrcFile* f, Expr* node) {
 // Record everything a parsed file declares at file scope
 static inline void declare_one(SrcFile* f, Expr* d);
 
+static void ct_collect_program(void);
+
 static inline void declare_file(SrcFile* f) {
+    if (!f->mod->is_c) ct_collect_program();    // what only exists at compile time is not declared
     for (size_t i = 0; i < f->ast->blockstmt_size; i++) {
         Expr* d = f->ast->blockstmt[i];
         RECOVER(declare_one(f, d));
@@ -717,6 +730,7 @@ static inline void file_check_imports(SrcFile* f) {
 }
 
 static inline void file_parse(SrcFile* f) {
+    ct_parse_ready();       // every file has had its first pass
     Parser p = parser_new(f->source);
     p.filename = f->path;
     p.env = f;

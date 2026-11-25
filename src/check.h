@@ -19,8 +19,20 @@ static Type* entity_type(Entity* e);
 static void impl_prepare(Impl* im);
 static const char* type_decl(Type* t, const char* name, Type* define, int indent);
 static int const_eval(Ctx* c, Expr* e, long long* out);
-static int reflection_constant(Ctx* c, Expr* e, long long* out);
 static Type* number_type(Token tok);
+
+// Where the checker meets compile-time code, it calls into comptime.h
+static int gen_ct_stmt(Ctx* c, Expr* s, Buf* out, int ind);
+static int gen_ct_expr(Ctx* c, Expr* e, Val* out);
+static int gen_ct_init(Ctx* c, Expr* e, Type* expected, Val* out);
+static int const_ct_eval(Ctx* c, Expr* e, long long* out);
+static Type* resolve_ct_type(Ctx* c, Expr* s);
+static Type* resolve_ct_arg(Ctx* c, Expr* arg);
+static Expr* resolve_ct_members(Ctx* c, Type* t);
+static int ct_member(Type* type);
+static void ct_schedule(void);
+static int gen_ct_function(FuncInst* fi);
+static int ct_more(void);
 
 #define FAIL(c, tok, ...) fatal((c)->file->path, (tok), __VA_ARGS__)
 
@@ -192,6 +204,7 @@ static void struct_body_into(Buf* b, Type* u, int indent) {
     buf_puts(b, " {\n");
     for (int i = 0; i < u->nfields; i++) {
         Field* f = &u->fields[i];
+        if (ct_member(f->type)) continue;        // exists in compile-time values only
         put_comments(b, f->lead, f->lead_len, indent + 1, i > 0, 1, u->quiet);
         buf_indent(b, indent + 1);
         if (f->verbatim) {
@@ -302,7 +315,8 @@ static const char* type_decl(Type* t, const char* name, Type* define, int indent
 
 static inline int quals_from_flags(int flags) {
     return (flags & F_CONST ? Q_CONST : 0) | (flags & F_VOLATILE ? Q_VOLATILE : 0) |
-           (flags & F_RESTRICT ? Q_RESTRICT : 0) | (flags & F_ATOMIC ? Q_ATOMIC : 0);
+           (flags & F_RESTRICT ? Q_RESTRICT : 0) | (flags & F_ATOMIC ? Q_ATOMIC : 0) |
+           (flags & F_COMPTIME ? Q_COMPTIME : 0);
 }
 
 static inline BuiltinKind builtin_from_mask(int mask) {
@@ -487,7 +501,6 @@ static void const_require(Ctx* c, Expr* e, const char* pname) {
             break;
         }
         case E_CALL: {
-            if (reflection_constant(c, e, NULL)) return;
             // only something that can be a function-like macro
             Expr* callee = e->right;
             if (callee->kind == E_IDENT && callee->token.kind == TK_IDENT) {
@@ -523,6 +536,8 @@ static Type* resolve_generic_arg(Ctx* c, SrcFile* decl_file, Expr* param, Expr* 
     const char* pname = tok_str(param->name);
 
     if (!param->type) {
+        Type* known = resolve_ct_arg(c, arg);    // a compile-time value that is a type
+        if (known) return known;
         Expr* type = type_argument(arg);
         if (!type)
             FAIL(c, arg->token, "generic parameter '%s' is a type, but a constant was given", pname);
@@ -700,7 +715,7 @@ static Type* resolve_named(Ctx* c, Expr* s) {
 }
 
 static void resolve_fields(Ctx* c, Type* t) {
-    Expr* body = t->body;
+    Expr* body = resolve_ct_members(c, t);       // with compile-time control carried out
     t->state = 1;
     Field* fields = (Field*)xalloc((body->blockstmt_size + 1) * sizeof(Field));
     int n = 0;
@@ -864,6 +879,8 @@ static Type* resolve_type(Ctx* c, Expr* s) {
     switch (s->kind) {
         case E_TY_HOLE:
             return resolve_type(c, s->left);
+        case E_CT_TYPE:
+            return type_qual(resolve_ct_type(c, s), quals);
         case E_TY_BASE:
             return type_qual(type_builtin(builtin_from_mask(s->aux)), quals);
         case E_TY_NAME:
@@ -1435,19 +1452,28 @@ static FuncInst* func_inst(Ctx* c, Func* f, Type** ivals, Type* self, Type** own
 
 // Infer a call's generic arguments from its argument types and, for parameters
 // the arguments leave open, from the type the context expects.
-static Type** infer_generics(Ctx* c, Func* f, Type** ivals, Type* self, Val* args, int nargs, int offset,
-                             Type* expected, Token at) {
+// The signature of f with its generic parameters as placeholders, which b binds
+static Type* generic_pattern(Func* f, Type** ivals, Type* self, Bind* b) {
     int n = generics_count(f->generics);
-    Bind b = {0};
-    b.n = n;
-    b.params = (Type**)xalloc((size_t)n * sizeof(Type*));
-    b.vals = (Type**)xalloc((size_t)n * sizeof(Type*));
+    *b = (Bind){0};
+    b->n = n;
+    b->params = (Type**)xalloc((size_t)n * sizeof(Type*));
+    b->vals = (Type**)xalloc((size_t)n * sizeof(Type*));
     for (int i = 0; i < n; i++)
-        b.params[i] = param_placeholder(f->file, f->generics->blockstmt[i]);
+        b->params[i] = param_placeholder(f->file, f->generics->blockstmt[i]);
     Ctx pc = ctx_for_file(f->file);
-    pc.tenv = tenv_bind(f->generics, b.params, f->impl ? tenv_bind(f->impl->decl->generics, ivals, NULL) : NULL);
+    pc.tenv = tenv_bind(f->generics, b->params, f->impl ? tenv_bind(f->impl->decl->generics, ivals, NULL) : NULL);
     pc.self = self;
-    Type* pattern = type_canon(resolve_type(&pc, f->proto->type));
+    return type_canon(resolve_type(&pc, f->proto->type));
+}
+
+// With `partial`, parameters the arguments do not determine stay NULL instead
+// of being an error
+static Type** infer_generics(Ctx* c, Func* f, Type** ivals, Type* self, Val* args, int nargs, int offset,
+                             Type* expected, Token at, int partial) {
+    int n = generics_count(f->generics);
+    Bind b;
+    Type* pattern = generic_pattern(f, ivals, self, &b);
 
     for (int i = 0; i < nargs && i + offset < pattern->nargs; i++) {
         Type* pt = pattern->args[i + offset];
@@ -1475,10 +1501,32 @@ static Type** infer_generics(Ctx* c, Func* f, Type** ivals, Type* self, Val* arg
             for (int i = 0; i < n; i++)
                 if (!b.vals[i]) b.vals[i] = probe.vals[i];
     }
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n && !partial; i++)
         if (!b.vals[i])
             FAIL(c, at, "cannot infer generic parameter '%s' of '%s'; pass it explicitly as '%s<...>'",
                  b.params[i]->name, f->name, f->name);
+    return b.vals;
+}
+
+// `void (*f)(int) = show;`: a generic function used as a value, without type
+// arguments, takes them from the function pointer type it is converted to
+static Type** infer_from_pointer(Ctx* c, Func* f, Type* expected, Token at) {
+    Type* t = type_canon(expected);
+    if (t->kind == TY_PTR) t = type_canon(t->base);
+    if (t->kind != TY_FUNC) return NULL;
+    Bind b;
+    Type* pattern = generic_pattern(f, NULL, NULL, &b);
+    if (!unify(pattern, t, &b)) {
+        if (b.conflict)
+            FAIL(c, at, "generic function '%s' does not fit '%s': its parameter '%s' would be both '%s' and '%s'",
+                 f->name, type_show(expected), b.params[b.conflict - 1]->name,
+                 type_show(b.vals[b.conflict - 1]), type_show(b.other));
+        FAIL(c, at, "generic function '%s' does not fit the function pointer type '%s'", f->name, type_show(expected));
+    }
+    for (int i = 0; i < b.n; i++)
+        if (!b.vals[i])
+            FAIL(c, at, "'%s' does not determine generic parameter '%s' of '%s'; pass it explicitly as '%s<...>'",
+                 type_show(expected), b.params[i]->name, f->name, f->name);
     return b.vals;
 }
 
@@ -1561,14 +1609,16 @@ static Type** resolve_func_args(Ctx* c, Func* f, Expr* targs, Token at) {
     return own;
 }
 
-static Val gen_entity_ref(Ctx* c, Entity* e, Expr* at) {
+static Val gen_entity_ref(Ctx* c, Entity* e, Expr* at, Type* expected) {
     switch (e->kind) {
         case ENT_FUNC: {
             if (!e->func) {
                 if (at->generics) FAIL(c, at->token, "'%s' is a C function and takes no type arguments", e->name);
                 return val(e->name, entity_type(e));
             }
-            Type** own = resolve_func_args(c, e->func, at->generics, at->token);
+            Type** own = !at->generics && generics_count(e->func->generics) && expected
+                ? infer_from_pointer(c, e->func, expected, at->token) : NULL;
+            if (!own) own = resolve_func_args(c, e->func, at->generics, at->token);
             FuncInst* fi = func_inst(c, e->func, NULL, NULL, own, at->token);
             return val(symbol_ref(fi->sym), fi->type);
         }
@@ -1659,7 +1709,7 @@ static PathRef resolve_path(Ctx* c, Expr* e) {
     FAIL(c, first_tok, "'%s' is neither a namespace imported in this file nor an enum type", first);
 }
 
-static Val gen_ident(Ctx* c, Expr* e) {
+static Val gen_ident(Ctx* c, Expr* e, Type* expected) {
     const char* name = tok_str(e->token);
     Local* l = local_find(c, L_VAR | L_ENUMCONST, name);
     if (l) {
@@ -1676,7 +1726,7 @@ static Val gen_ident(Ctx* c, Expr* e) {
         return val(xstrf("(%s)%s", type_decl(k->base, NULL, NULL, 0), const_text(k)), k->base);
     }
     Entity* ent = scope_entity(c, name);
-    if (ent) return gen_entity_ref(c, ent, e);
+    if (ent) return gen_entity_ref(c, ent, e, expected);
 
     if (strcmp(name, "__func__") == 0 || strcmp(name, "__FILE__") == 0 ||
         strcmp(name, "__DATE__") == 0 || strcmp(name, "__TIME__") == 0)
@@ -1702,13 +1752,23 @@ static Val gen_operand(Ctx* c, Expr* e, Type* expected) {
 
 #define MAX_ARGS 128
 
-static int gen_reflection(Ctx* c, Expr* e, Type* expected, int initializer, Val* out);
-static int reflection_set_indent(int indent);
+// A generic function named without type arguments, as `show` in apply(3, show)
+static int is_bare_generic(Ctx* c, Expr* e) {
+    if (e->kind == E_UNARY && token_is(e->token, "&")) return is_bare_generic(c, e->left);
+    if (e->generics) return 0;
+    Entity* ent = NULL;
+    if (e->kind == E_IDENT && e->token.kind == TK_IDENT) {
+        const char* name = tok_str(e->token);
+        if (local_find(c, L_VAR | L_ENUMCONST, name) || const_binding(c, name)) return 0;
+        ent = scope_entity(c, name);
+    } else if (e->kind == E_PATH) {
+        ent = resolve_path(c, e).ent;
+    }
+    return ent && ent->kind == ENT_FUNC && ent->func && generics_count(ent->func->generics) > 0;
+}
 
 static Val gen_call(Ctx* c, Expr* e, Type* expected) {
     Expr* callee = e->right;
-    Val reflected;
-    if (gen_reflection(c, e, expected, 0, &reflected)) return reflected;
     Expr* argv[MAX_ARGS];
     int argc = 0;
     for (Expr* a = e->left; a; a = a->right) {
@@ -1789,8 +1849,24 @@ static Val gen_call(Ctx* c, Expr* e, Type* expected) {
         for (int i = 0; i < argc; i++)
             args[i] = gen_expr(c, argv[i], i + offset < fi->type->nargs ? fi->type->args[i + offset] : NULL);
     } else {
-        for (int i = 0; i < argc; i++) args[i] = gen_expr(c, argv[i], NULL);
-        own = infer_generics(c, f, ivals, self, args, argc, offset, expected, at);
+        // a generic function passed without type arguments, as in apply(3, show),
+        // waits until the other arguments have inferred its parameter's type
+        int waiting[MAX_ARGS] = {0}, any = 0;
+        for (int i = 0; i < argc; i++) {
+            waiting[i] = is_bare_generic(c, argv[i]);
+            any |= waiting[i];
+            args[i] = waiting[i] ? val("", &g_unknown) : gen_expr(c, argv[i], NULL);
+        }
+        if (any) {
+            Type** known = infer_generics(c, f, ivals, self, args, argc, offset, expected, at, 1);
+            int complete = 1;
+            for (int i = 0; i < ngen; i++) complete = complete && known[i];
+            FuncInst* pi = complete ? func_inst(c, f, ivals, self, known, at) : NULL;
+            for (int i = 0; i < argc; i++)
+                if (waiting[i])
+                    args[i] = gen_expr(c, argv[i], pi && i + offset < pi->type->nargs ? pi->type->args[i + offset] : NULL);
+        }
+        own = infer_generics(c, f, ivals, self, args, argc, offset, expected, at, 0);
         fi = func_inst(c, f, ivals, self, own, at);
     }
 
@@ -1861,7 +1937,7 @@ static Val gen_binary(Ctx* c, Expr* e, Type* expected) {
         FuncInst* fi;
         if (f->generics) {
             r = gen_operand(c, e->right, NULL);
-            own = infer_generics(c, f, ivals, self, &r, 1, 1, expected, op);
+            own = infer_generics(c, f, ivals, self, &r, 1, 1, expected, op, 0);
             fi = func_inst(c, f, ivals, self, own, op);
         } else {
             fi = func_inst(c, f, ivals, self, NULL, op);
@@ -1901,9 +1977,11 @@ static Val gen_binary(Ctx* c, Expr* e, Type* expected) {
     return val(text, arith_type(l.t, r.t));
 }
 
-static Val gen_unary(Ctx* c, Expr* e) {
+static Val gen_unary(Ctx* c, Expr* e, Type* expected) {
     Token op = e->token;
-    Val v = gen_expr(c, e->left, NULL);
+    Type* pointee = expected && token_is(op, "&") && type_canon(expected)->kind == TY_PTR
+        ? type_canon(expected)->base : NULL;
+    Val v = gen_expr(c, e->left, pointee);
     if (token_kw(op, "sizeof"))
         return val(xstrf(v.s[0] == '(' ? "sizeof%s" : "sizeof %s", v.s), g_size_t);
 
@@ -1929,7 +2007,7 @@ static Val gen_expr_inner(Ctx* c, Expr* e, Type* expected) {
             return gen_expr(c, e->left, expected);
         case E_IDENT:
             switch (e->token.kind) {
-                case TK_IDENT: return gen_ident(c, e);
+                case TK_IDENT: return gen_ident(c, e, expected);
                 case TK_STR: {
                     char prefix = e->token.start[0];
                     return val(tok_str(e->token), prefix == '"' || prefix == 'u' ? g_char_ptr : &g_unknown);
@@ -1939,7 +2017,7 @@ static Val gen_expr_inner(Ctx* c, Expr* e, Type* expected) {
             }
         case E_PATH: {
             PathRef r = resolve_path(c, e);
-            if (r.ent) return gen_entity_ref(c, r.ent, e);
+            if (r.ent) return gen_entity_ref(c, r.ent, e, expected);
             if (e->generics) FAIL(c, e->token, "an enum constant takes no type arguments");
             return gen_enum_const(c, r.enum_type, r.constant);
         }
@@ -1948,7 +2026,7 @@ static Val gen_expr_inner(Ctx* c, Expr* e, Type* expected) {
         case E_TYPEARG:
             return val(type_decl(resolve_type(c, e->type), NULL, NULL, 0), &g_unknown);
         case E_UNARY:
-            return gen_unary(c, e);
+            return gen_unary(c, e, expected);
         case E_POSTFIX: {
             Val v = gen_expr(c, e->left, NULL);
             return val(xstrf("%s%s", v.s, tok_str(e->token)), v.t);
@@ -2001,7 +2079,9 @@ static Val gen_expr_inner(Ctx* c, Expr* e, Type* expected) {
 }
 
 static Val gen_expr(Ctx* c, Expr* e, Type* expected) {
-    Val v = gen_expr_inner(c, e, expected);
+    Val v;
+    if (gen_ct_expr(c, e, &v)) return v;
+    v = gen_expr_inner(c, e, expected);
     if (e->flags & F_PAREN) v.s = xstrf("(%s)", v.s);
     return v;
 }
@@ -2009,8 +2089,8 @@ static Val gen_expr(Ctx* c, Expr* e, Type* expected) {
 // An initializer. Braced lists pass the member / element types down so nested
 // generic calls can infer from them.
 static Val gen_init(Ctx* c, Expr* e, Type* expected) {
-    Val reflected;
-    if (gen_reflection(c, e, expected, 1, &reflected)) return reflected;
+    Val known;
+    if (gen_ct_init(c, e, expected, &known)) return known;
     if (e->kind != E_INIT_LIST) return gen_expr(c, e, expected);
 
     Type* t = expected ? type_canon(expected) : &g_unknown;
@@ -2112,11 +2192,7 @@ static void gen_local_decl(Ctx* c, Expr* g, Buf* out, int ind) {
             local_push(c, L_TYPEDEF, name, alias);
         }
         Val init = {0};
-        if (d->left) {
-            int outer = reflection_set_indent(ind);
-            init = gen_init(c, d->left, t);
-            reflection_set_indent(outer);
-        }
+        if (d->left) init = gen_init(c, d->left, t);
         if (!is_typedef) local_push(c, L_VAR, name, t);
 
         if (single) {
@@ -2215,6 +2291,7 @@ static void gen_raw_lines(Buf* out, Token tok, int ind) {
 }
 
 static void gen_stmt(Ctx* c, Expr* e, Buf* out, int ind) {
+    if (gen_ct_stmt(c, e, out, ind)) return;
     switch (e->kind) {
         case E_BLOCK:
             buf_indent(out, ind);
@@ -2367,6 +2444,7 @@ static int enum_value(Type* t, const char* name, long long* out) {
 static int const_eval(Ctx* c, Expr* e, long long* out) {
     e = const_preprocess(c, e);
     long long a, b;
+    if (const_ct_eval(c, e, out)) return 1;
     switch (e->kind) {
         case E_IDENT: {
             Token tok = e->token;
@@ -2400,8 +2478,6 @@ static int const_eval(Ctx* c, Expr* e, long long* out) {
             if (!r.enum_type || type_canon(r.enum_type)->kind != TY_ENUM) return 0;
             return enum_value(type_canon(r.enum_type), tok_str(r.constant), out);
         }
-        case E_CALL:
-            return reflection_constant(c, e, out);
         case E_UNARY: {
             if (e->token.kind != TK_PUNCT || !const_eval(c, e->left, &a)) return 0;
             if (token_is(e->token, "-")) *out = -a;
@@ -2607,12 +2683,14 @@ static void check_overlaps(void) {
 
 // Generate everything queued so far, including what that generation requests
 static void drain_functions(void) {
-    for (size_t i = 0; i < g_insts.len; i++) {
-        FuncInst* fi = (FuncInst*)g_insts.items[i];
-        if (!fi->generated) RECOVER(gen_function(fi));
-        g_generating = NULL;
-        g_resolving_type = NULL;
-    }
+    do {
+        for (size_t i = 0; i < g_insts.len; i++) {
+            FuncInst* fi = (FuncInst*)g_insts.items[i];
+            if (!fi->generated && !gen_ct_function(fi)) RECOVER(gen_function(fi));
+            g_generating = NULL;
+            g_resolving_type = NULL;
+        }
+    } while (ct_more());    // generators may have emitted more
 }
 
 // One file-scope declaration
@@ -2655,6 +2733,7 @@ static void check_entity(Entity* e) {
 
 // Check and lower every namespace that was loaded
 static void compile_program(void) {
+    ct_schedule();      // the generators that the files start
     for (size_t i = 0; i < g_impls.len; i++) RECOVER(check_impl((Impl*)g_impls.items[i]));
     check_overlaps();
 

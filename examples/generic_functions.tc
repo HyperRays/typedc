@@ -14,6 +14,11 @@ void swap<T>(T* a, T* b) {
 
 // T does not show up in the parameters here, so it has to come from
 // somewhere else (see the two calls in main)
+// a function pointer parameter can use T like any other parameter
+T combine<T>(T a, T b, T (*f)(T, T)) {
+    return f(a, b);
+}
+
 T zero<T>(void) {
     T value = 0;
     return value;
@@ -45,6 +50,13 @@ int main(void) {
     // so you can take a pointer to it
     int (*pick)(int, int) = max_of<int>;
     printf("%d\n", pick(1, 2));
+
+    // without type arguments, a generic function takes them from the
+    // function pointer type it is converted to, so this is max_of<double>
+    double (*larger)(double, double) = max_of;
+    // the same works for an argument: T of combine comes from 4 and 5, which
+    // makes the parameter an int (*)(int, int), and max_of becomes max_of<int>
+    printf("%g %d\n", larger(1.5, 0.5), combine(4, 5, max_of));
 }
 
 // typedc transpiler will generate something like this:
@@ -61,6 +73,7 @@ int main(void) {
 // static inline void swap(char** a, char** b);
 // static inline long long_zero(void);
 // static inline float float_zero(void);
+// static inline int combine(int a, int b, int (*f)(int, int));
 //
 // int main(void) {
 //     printf("%d\n", int_max_of(3, 7));
@@ -74,6 +87,8 @@ int main(void) {
 //     printf("%ld %f\n", a, float_zero());
 //     int (*pick)(int, int) = int_max_of;
 //     printf("%d\n", pick(1, 2));
+//     double (*larger)(double, double) = double_max_of;
+//     printf("%g %d\n", larger(1.5, 0.5), combine(4, 5, int_max_of));
 // }
 //
 // static inline int int_max_of(int a, int b) {
@@ -98,6 +113,10 @@ int main(void) {
 // static inline float float_zero(void) {
 //     float value = 0;
 //     return value;
+// }
+//
+// static inline int combine(int a, int b, int (*f)(int, int)) {
+//     return f(a, b);
 // }
 //
 // #endif /* TYPEDC_GENERIC_FUNCTIONS_H */

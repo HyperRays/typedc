@@ -3,7 +3,7 @@
 
 // You can compile this code with whichever c compiler you want
 // and in general you can use this
-// ./build/main examples/hello_world.c | cc -std=c11 -x c - -o build/hello_world
+// ./build/main examples/hello_world.tc | cc -std=c11 -x c - -o build/hello_world
 
 #include <stdio.h>
 int main(void) {
@@ -23,5 +23,5 @@ int main(void) {
 // int main(void) {
 //     printf("Hello World!\n");
 // }
-
+//
 // #endif /* TYPEDC_HELLO_WORLD_H */

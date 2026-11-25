@@ -101,7 +101,7 @@ typedef enum {
     TY_CONST,       // a constant generic argument (never the type of a value)
 } TypeKind;
 
-enum { Q_CONST = 1, Q_VOLATILE = 2, Q_RESTRICT = 4, Q_ATOMIC = 8 };
+enum { Q_CONST = 1, Q_VOLATILE = 2, Q_RESTRICT = 4, Q_ATOMIC = 8, Q_COMPTIME = 16 };     // Q_COMPTIME: a compile-time variable (comptime.h)
 
 struct Field {
     const char* name;       // NULL for anonymous members
@@ -430,7 +430,7 @@ static inline const char* types_ident(Type** types, int count) {
     return buf_str(&b);
 }
 
-// Source-level spelling for diagnostics and reflection
+// Source-level spelling for diagnostics
 static inline void type_show_into(Buf* b, Type* t) {
     if (!t) { buf_puts(b, "<none>"); return; }
     if (t->kind != TY_PTR) {
@@ -608,6 +608,7 @@ struct Local {
     int kind;
     const char* name;
     Type* type;
+    char* at;               // a compile-time variable: where its value is in compile-time memory
     Local* next;
 };
 
@@ -632,6 +633,8 @@ struct SrcFile {
     Item* last_raw;
     Map statics;            // `static` functions and variables: visible in this file only
     Map dotops;             // dotted operators visible in this file -> packed binding powers
+    List ct_imports;        // Import*: what the '@' functions of the file import in their bodies (comptime.h)
+    Local* captured;        // the file of an emitted item: the variables of the '@' function that emitted it
 };
 
 // A namespace (one directory), or the declarations of a set of C headers
@@ -676,6 +679,7 @@ static inline Ctx ctx_for_file(SrcFile* file) {
     Ctx c = {0};
     c.file = file;
     c.mod = file->mod;
+    c.locals = file->captured;
     return c;
 }
 
