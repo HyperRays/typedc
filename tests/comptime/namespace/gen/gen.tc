@@ -1,0 +1,24 @@
+static const char* prefix(void) { return "gen"; }
+
+// A type, a table and a function per struct. They are declared where the
+// generator is used and see each other there. Of this file they have what the
+// generator brings: its includes and imports, and its variables.
+pub void @describe<T>(int scale) {
+    #include <stdio.h>
+    import builtin;
+    const char* who = @name<T>();
+    const char* from = prefix();
+    int members = @count<T>() * scale;
+
+    @emit typedef struct { T value; int tag; } Tagged;
+
+    @emit struct Pair { T first; T second; };
+
+    @emit static const builtin::Field table[] = @fields<T>();
+
+    @emit int describe(Tagged* t) {
+        struct Pair twice = {t->value, t->value};
+        printf("%s: %s with %d, first %s, tag %d, origin %d\n", from, who, members, table[0].name, t->tag, origin.x + twice.second.y);
+        return members;
+    }
+}

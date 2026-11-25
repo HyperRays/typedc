@@ -1,0 +1,63 @@
+#include <stdio.h>
+
+trait Show { void show(Self self); }
+
+impl Show for int { void show(Self self) { printf("%d", self); } }
+impl Show for double { void show(Self self) { printf("%g", self); } }
+
+typedef struct { int x; int y; } Point;
+typedef struct { Point from; Point to; double width; } Line;
+typedef struct Tree { int value; struct Tree* left; struct Tree* right; } Tree;
+
+// a pointer shows what it points to, or "null"
+void @derive_show<T>() {
+    #include <stdio.h>
+    import builtin;
+
+    if (@implements<T, Show>()) return;
+
+    if (@kind<T>() == builtin::FieldKind::FIELD_POINTER) {
+        @emit impl Show for T {
+            void show(Self self) {
+                if (self) (*self).show();
+                else printf("null");
+            }
+        }
+        @derive_show<@pointee<T>()>();
+        return;
+    }
+
+    @emit impl Show for T {
+        void show(Self self) {
+            printf("%s { ", @name<T>());
+            for (@int i = 0; i < @count<T>(); i++) {
+                builtin::@Field f = @fields<T>()[i];
+                if (i) printf(", ");
+                printf("%s: ", f.name);
+                self.[f].show();
+            }
+            printf(" }");
+        }
+    }
+
+    for (int i = 0; i < @count<T>(); i++)
+        @derive_show<@fields<T>()[i].type>();
+}
+
+@derive_show<Line>();
+@derive_show<Tree>();
+@derive_show<Point>();
+
+int main(void) {
+    Line l = {{1, 2}, {3, 4}, 0.5};
+    Tree leaf = {2, 0, 0};
+    Tree root = {1, &leaf, 0};
+    l.show();
+    printf("\n");
+    root.show();
+    printf("\n");
+    return 0;
+}
+
+//> Line { from: Point { x: 1, y: 2 }, to: Point { x: 3, y: 4 }, width: 0.5 }
+//> Tree { value: 1, left: Tree { value: 2, left: null, right: null }, right: null }

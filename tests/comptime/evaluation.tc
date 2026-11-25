@@ -1,0 +1,55 @@
+#include <stdio.h>
+import builtin;
+
+trait Show { int show(Self self); }
+typedef struct { int x; unsigned char small; } P;
+typedef enum { RED, GREEN = 4, BLUE } Color;
+int scale<T, int N>(T v) { return (int)v * N; }
+
+const char* @colour(int v) {
+    switch (v) {
+        case 0: return "red";
+        case 4:
+        case 5: return "greenish";
+        default: break;
+    }
+    return "other";
+}
+
+unsigned char @wrap() {
+    unsigned char c = 250;
+    c += 10;
+    int big = 2147483647;
+    big++;
+    unsigned int u = 0;
+    u--;
+    return c + (big < 0) + (u > 100);
+}
+
+// answered while generators run: nothing implements Show for P
+static const int p_shows = @implements<P, Show>();
+
+int main(void) {
+    const builtin::@Enumerator all[] = @enumerators<Color>();
+    for (@int i = 0; i < sizeof all / sizeof all[0]; i++)
+        printf("%s=%d %s\n", all[i].name, (int)all[i].value, @colour((int)all[i].value));
+    @int kind = 2;
+    switch (kind) {
+        case 1: printf("one\n"); break;
+        case 2: printf("two\n");
+        case 3: printf("three\n"); break;
+        default: printf("many\n");
+    }
+    builtin::@Field f = @fields<P>()[1];
+    printf("%d %d %d\n", @wrap(), (int)(f.offset + f.size), p_shows);
+    printf("%s %s %s\n", @generics<scale<double, 3>>()[0].type_name, @generics<scale<double, 3>>()[1].name, @generics<scale<double, 3>>()[1].value);
+    return 0;
+}
+
+//> RED=0 red
+//> GREEN=4 greenish
+//> BLUE=5 greenish
+//> two
+//> three
+//> 6 5 0
+//> double N 3

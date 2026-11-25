@@ -1,0 +1,22 @@
+// A file-scope initializer that asks waits like everything else: the
+// generator below supplies the implementation it asks about.
+#include <stdio.h>
+trait Show { int show(Self self); }
+typedef struct { int x; } P;
+typedef struct { int y; } Q;
+
+static const int p_shows = @implements<P, Show>();
+static const int q_shows = @implements<Q, Show>();
+
+void @derive<T>() {
+    @emit impl Show for T { int show(Self self) { return 7; } }
+}
+@derive<P>();
+
+int main(void) {
+    P p = {1};
+    printf("%d %d %d\n", p_shows, q_shows, p.show());
+    return 0;
+}
+
+//> 1 0 7

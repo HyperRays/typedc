@@ -1,0 +1,6 @@
+// expect: '@emit' is only allowed in the body of an '@' function
+trait Show { int show(Self self); }
+trait Other { int other(Self self); }
+typedef struct { int x; } P;
+void f(void) { @emit int g(void) { return 1; } }
+int main(void) { f(); return 0; }

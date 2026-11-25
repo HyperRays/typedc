@@ -1,0 +1,4 @@
+// expect: it keeps the value it was initialized with
+@int limit = 3;
+int @run() { limit = 4; return limit; }
+int main(void) { return @run(); }

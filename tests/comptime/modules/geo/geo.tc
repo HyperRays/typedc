@@ -1,0 +1,5 @@
+pub typedef struct { int x; int y; } Vec;
+pub @Vec unit = {1, 1};
+pub @int scale = 3;
+pub Vec @grow(Vec v, int by) { v.x *= by; v.y *= by; return v; }
+pub int @power(int b, int e) { return e ? b * @power(b, e - 1) : 1; }

@@ -1,0 +1,97 @@
+#include <stdio.h>
+
+typedef struct { int x; int y; } Point;
+typedef struct { Point from; Point to; int width; } Line;
+typedef<T> struct { T value; int count; } Box<T>;
+typedef enum { IDLE, RUNNING, STOPPED = 5 } State;
+
+trait Show { void show(Self self); }
+impl Show for int { void show(Self self) { printf("%d", self); } }
+
+void @derive_show<T>() {
+    #include <stdio.h>
+    import builtin;
+
+    if (@implements<T, Show>()) return;
+
+    @emit impl Show for T {
+        void show(Self self) {
+            printf("%s { ", @name<T>());
+            for (@int i = 0; i < @count<T>(); i++) {
+                builtin::@Field f = @fields<T>()[i];
+                if (i) printf(", ");
+                printf("%s: ", f.name);
+                self.[f].show();
+            }
+            printf(" }");
+        }
+    }
+
+    for (@int i = 0; i < @count<T>(); i++)
+        @derive_show<@fields<T>()[i].type>();
+}
+
+@derive_show<Line>();
+for<T> @derive_show<Box<T>>();
+
+void @make_builder<T>() {
+    import builtin;
+
+    @emit typedef struct {
+        for (@int i = 0; i < @count<T>(); i++)
+            @type(@fields<T>()[i].type) @ident(@fields<T>()[i].name);
+    } @ident(@name<T>(), "Builder");
+
+    @emit struct @ident(@name<T>(), "Tagged") {
+        if (@count<T>() > 2) int many;
+        else int few;
+        @type(@fields<T>()[0].type) first;
+    };
+
+    @emit impl T {
+        for (@int i = 0; i < @count<T>(); i++) {
+            builtin::@Field f = @fields<T>()[i];
+            @type(f.type) @ident("get_", f.name)(Self self) { return self.[f]; }
+        }
+    }
+}
+
+@make_builder<Line>();
+
+void @derive_name<E>() {
+    import builtin;
+
+    @emit impl E {
+        const char* name(Self self) {
+            const builtin::@Enumerator all[] = @enumerators<E>();
+            for (@int i = 0; i < sizeof all / sizeof all[0]; i++)
+                if (self == all[i].value) return all[i].name;
+            return 0;
+        }
+    }
+}
+
+@derive_name<State>();
+
+int main(void) {
+    Line l = {{1, 2}, {3, 4}, 7};
+    l.show();
+    printf("\n");
+    Box<int> b = {42, 1};
+    b.show();
+    printf("\n");
+    Box<Point> bp = {{5, 6}, 2};
+    bp.show();
+    printf("\n");
+    struct LineTagged lb;
+    lb.first = l.from;
+    lb.many = l.get_width() + l.get_to().y + lb.first.x;
+    State s = STOPPED;
+    printf("%d %s %s\n", lb.many, s.name(), ((State)RUNNING).name());
+    return 0;
+}
+
+//> Line { from: Point { x: 1, y: 2 }, to: Point { x: 3, y: 4 }, width: 7 }
+//> Box { value: 42, count: 1 }
+//> Box { value: Point { x: 5, y: 6 }, count: 2 }
+//> 12 STOPPED RUNNING

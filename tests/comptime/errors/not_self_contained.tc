@@ -1,0 +1,4 @@
+// expect: undeclared identifier 'helper'
+import gen;
+gen::@uses_helper();
+int main(void) { return from_helper(); }

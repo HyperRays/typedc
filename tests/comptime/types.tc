@@ -1,0 +1,97 @@
+#include <stdio.h>
+
+typedef struct { int x; int y; } Point;
+typedef struct { Point from; Point to; double weight; const char* label; char tag; } Edge;
+typedef enum { IDLE, RUNNING, STOPPED = 5 } State;
+typedef union { int whole; unsigned char bytes[4]; } Bits;
+
+@Point origin = {1, 2};
+@double tau = 6.28318;
+@int primes[5] = {2, 3, 5, 7, 11};
+@const char* greeting = "hello";
+
+Point @shift(Point p, int by) {
+    p.x += by;
+    p.y += by;
+    return p;
+}
+
+double @mean(int* values, int count) {
+    double total = 0;
+    for (int i = 0; i < count; i++) total += values[i];
+    return total / count;
+}
+
+int @length(const char* s) {
+    int n = 0;
+    while (*s++) n++;
+    return n;
+}
+
+Edge @edge(Point a, Point b) {
+    Edge e = {.from = a, .to = b, .label = "made"};
+    e.weight = (b.x - a.x) * 0.5;
+    e.tag = 'e';
+    return e;
+}
+
+State @next(State s) { return s == IDLE ? RUNNING : STOPPED; }
+
+int @fill(int n) { int out[6]; for (int i = 0; i < n; i++) out[i] = i * i; return @mean(out, n) * n; }
+
+int main(void) {
+    @Point p = {.y = 4, .x = 3};
+    p.x = p.x * 10;
+    @Point* pp = &p;
+    pp->y += 1;
+    Point q = p;
+    printf("%d %d\n", q.x, q.y);
+    Point r = @shift(origin, 10);
+    printf("%d %d %d\n", r.x, r.y, @shift(p, 1).x);
+
+    @double half = tau / 2;
+    @float f = 1.5f;
+    f *= 3;
+    printf("%g %g %g\n", half, f, @mean(primes, 5));
+
+    @int squares[4];
+    for (@int i = 0; i < 4; i++) squares[i] = primes[i] * primes[i];
+    int copy[4] = squares;
+    printf("%d %d %d %d, %d\n", copy[0], copy[1], copy[2], copy[3], squares[3] - squares[0]);
+
+    @const char* s = greeting;
+    printf("%s %d %c\n", s, @length(s), s[1]);
+
+    Edge e = @edge(origin, p);
+    printf("%d %d %d %d %g %s %c\n", e.from.x, e.from.y, e.to.x, e.to.y, e.weight, e.label, e.tag);
+
+    @State st = @next(IDLE);
+    State now = st;
+    printf("%d %d %d\n", now, @next(st), (int)sizeof(Edge) == @length("") + sizeof(Edge));
+
+    @Bits b = {.whole = 258};
+    printf("%d %d\n", b.bytes[0], b.bytes[1]);
+
+    @int sum = @fill(6);
+    printf("%d\n", sum);
+
+    @Point grid[2] = {{1, 2}, {3, 4}};
+    grid[1] = @shift(grid[0], 100);
+    printf("%d %d\n", grid[1].x, grid[1].y);
+    @unsigned long big = 1;
+    big <<= 40;
+    printf("%lu\n", big);
+    return 0;
+}
+
+//> 30 5
+//> 11 12 31
+//> 3.14159 4.5 5.6
+//> 4 9 25 49, 45
+//> hello 5 e
+//> 1 2 30 5 14.5 made e
+//> 1 5 1
+//> 2 1
+//> 55
+//> 101 102
+//> 1099511627776

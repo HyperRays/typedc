@@ -1,0 +1,4 @@
+// expect: 'abs' cannot be called at compile time: typedc has no definition of it to run
+#include <stdlib.h>
+int @r() { return abs(-3); }
+int main(void) { return @r(); }

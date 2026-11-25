@@ -1,0 +1,4 @@
+// expect: depends on itself
+@int a = b + 1;
+@int b = a + 1;
+int main(void) { return a; }

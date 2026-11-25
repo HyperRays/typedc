@@ -1,0 +1,4 @@
+// expect: the index into a compile-time array must be a compile-time value
+import builtin;
+typedef struct { int x; } P;
+int main(void) { for (int i = 0; i < 1; i++) { const char* n = @fields<P>()[i].name; } return 0; }

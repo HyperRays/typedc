@@ -1,0 +1,2 @@
+// expect: 'import' is only allowed in the body of an '@' function
+int main(void) { import builtin; return 0; }

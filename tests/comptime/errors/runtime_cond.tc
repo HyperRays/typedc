@@ -1,0 +1,2 @@
+// expect: a loop over a compile-time variable needs a condition that is a compile-time value
+int main(int argc, char** argv) { for (@int i = 0; argc < 3; i++) { } return 0; }

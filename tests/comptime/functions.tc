@@ -1,0 +1,25 @@
+#include <stdio.h>
+typedef struct { int x; int y; } Point;
+int @find(int want) {
+    int values[5] = {4, 8, 15, 16, 23};
+    for (int i = 0; i < 5; i++) {
+        switch (values[i] == want) { case 1: return i; default: continue; }
+    }
+    return -1;
+}
+int @guard(int n) { int hits = 0; if (n > 0 && ++hits) hits += 10; if (n > 5 || ++hits) hits += 100; return hits; }
+double @pick(int n) { return n ? 1 : 2.5; }
+int @sizes() { typedef Point Pair; Pair p = {1, 2}; int a[7]; return sizeof(p) + sizeof a + sizeof(a[9]) + (int)sizeof p.x++ + p.x; }
+int @loops(int n) { int t = 0; for (;;) { if (++t >= n) break; } do { t += 2; } while (t < 20); while (t) { if (t-- % 7 == 0) return t; } return 0; }
+int @fact(int n) { return n < 2 ? 1 : n * @fact(n - 1); }
+int main(void) {
+    printf("%d %d %d %d\n", @find(15), @find(5), @guard(0), @guard(9));
+    printf("%g %g %d %d %d\n", @pick(1), @pick(0), @sizes(), @loops(3), @fact(10));
+    @int n = 3;
+    printf("%g %d\n", n > 2 ? 1 : 2.5, (int)sizeof n);
+    return 0;
+}
+
+//> 2 -1 101 111
+//> 1 2.5 45 20 3628800
+//> 1 4

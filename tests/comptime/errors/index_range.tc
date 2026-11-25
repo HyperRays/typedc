@@ -1,0 +1,4 @@
+// expect: index 1 is outside an array of 1
+import builtin;
+typedef struct { int x; } P;
+int main(void) { builtin::@Field f = @fields<P>()[1]; return 0; }

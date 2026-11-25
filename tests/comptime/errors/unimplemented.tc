@@ -1,0 +1,9 @@
+// expect: this makes 'P' implement 'Show', which was already settled as unimplemented for the code at
+trait Show { int show(Self self); }
+trait Other { int other(Self self); }
+typedef struct { int x; } P;
+void @needs<T>() { if (@implements<T, Show>()) return; @emit int fallback(void) { return 0; } }
+void @late<T>() { if (@implements<T, Other>()) return; @emit impl Show for T { int show(Self self) { return 1; } } }
+@needs<P>();
+@late<P>();
+int main(void) { return 0; }

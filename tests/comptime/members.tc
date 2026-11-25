@@ -1,0 +1,53 @@
+#include <stdio.h>
+@int width = 3;
+
+typedef<int N> struct {
+    int base;
+    for (@int i = 0; i < N; i++) int @ident("slot", i);
+    if (N > 2) double big;
+    else char small;
+} Slots<N>;
+
+typedef struct { int v; } Num;
+
+impl Num {
+    for (@int i = 1; i <= width; i++) {
+        @int factor = i * 10;
+        int @ident("times", factor)(Self self) { return self.v * factor; }
+    }
+}
+
+trait Named {
+    const char* name(Self self);
+    if (width > 2) int rank(Self self);
+}
+impl Named for Num {
+    const char* name(Self self) { return "num"; }
+    int rank(Self self) { return self.v; }
+}
+
+trait Show { void show(Self self); }
+void @default_show<T>() {
+    #include <stdio.h>
+    if (@implements<T, Show>()) return;
+    @emit impl Show for T { void show(Self self) { printf("<%s>\n", @name<T>()); } }
+}
+void @make<T>(int n) {
+    @emit int @helper(int k) { return k * n; }
+    @emit int @ident("made_", @name<T>())(void) { return @helper(7); }
+}
+@default_show<Num>();
+@make<Num>(6);
+
+int main(void) {
+    Slots<3> s = {0};
+    Slots<1> t = {0};
+    s.slot2 = 5; s.big = 1.5; t.slot0 = 2; t.small = 'c';
+    Num n = {4};
+    printf("%d %g %d %c %d %d %s %d %d\n", s.slot2, s.big, t.slot0, t.small, n.times10(), n.times30(), n.name(), n.rank(), made_Num());
+    n.show();
+    return 0;
+}
+
+//> 5 1.5 2 c 40 120 num 4 42
+//> <Num>

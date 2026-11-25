@@ -1,0 +1,2 @@
+// expect: compile-time variable 'n' cannot change inside a branch or loop that is decided at runtime
+int main(int argc, char** argv) { @int n = 0; if (argc > 1) n = 1; return n; }

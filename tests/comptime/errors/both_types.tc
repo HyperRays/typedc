@@ -1,0 +1,4 @@
+// expect: are both declared as types
+typedef struct { int x; } Plan;
+typedef struct { int y; } @Plan;
+int main(void) { return 0; }

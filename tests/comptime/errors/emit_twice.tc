@@ -1,0 +1,8 @@
+// expect: redefinition of function 'same'
+trait Show { int show(Self self); }
+trait Other { int other(Self self); }
+typedef struct { int x; } P;
+void @gen<T>() { @emit int same(void) { return 1; } }
+@gen<int>();
+@gen<P>();
+int main(void) { return same(); }

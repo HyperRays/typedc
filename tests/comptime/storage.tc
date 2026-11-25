@@ -1,0 +1,48 @@
+// Compile-time variables at file scope, compile-time types, and pointers
+#include <stdio.h>
+
+typedef struct { int x; int y; } Point;
+
+// a type that only exists at compile time
+typedef struct { const char* label; int weight; @Type of; } @Plan;
+
+@int limit = 3;
+@Plan plans[] = {{"small", 1}, {"large", 10}};
+@Point origin_value = {4, 5};
+
+void bump(int* value, int by) { *value += by; }
+
+int total(int* values, int count) {
+    int sum = 0;
+    for (int* p = values; p < values + count; p++) sum += *p;
+    return sum;
+}
+
+int @sum_to(int n) {
+    int values[8] = {0};
+    for (int i = 0; i < n; i++) values[i] = i + 1;
+    int first = values[0];
+    bump(&first, 100);
+    Point p = {1, 2};
+    Point* at = &p;
+    at->y = at->x + first;
+    int* last = &values[n - 1];
+    return total(values, n) + p.y + (int)(last - values) + (at ? 1 : 0);
+}
+
+int @heaviest() {
+    @Plan* best = 0;
+    for (int i = 0; i < 2; i++)
+        if (!best || plans[i].weight > best->weight) best = &plans[i];
+    return best->weight * limit;
+}
+
+int main(void) {
+    int runtime[limit];
+    @Plan chosen = plans[1];
+    Point origin = origin_value;
+    printf("%d %d %s %d %d\n", @sum_to(4), @heaviest(), chosen.label, (int)(sizeof runtime / sizeof runtime[0]), origin.y);
+    return 0;
+}
+
+//> 116 30 large 3 5

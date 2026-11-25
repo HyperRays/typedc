@@ -1,0 +1,4 @@
+// expect: only a call of an '@' function can stand at file scope
+int @one() { return 1; }
+@one;
+int main(void) { return 0; }

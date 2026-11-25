@@ -1,0 +1,2 @@
+// expect: division by zero at compile time
+int main(void) { @int z = 0; return 1 / z; }

@@ -1,0 +1,2 @@
+// expect: a pointer to compile-time memory has no runtime form
+int main(void) { @int n = 0; int* p = &n; return *p; }

@@ -1,0 +1,3 @@
+// expect: a pointer is dereferenced at compile time outside the value it points into
+int @run() { int v[4] = {0}; int* p = v + 4; return *p; }
+int main(void) { return @run(); }

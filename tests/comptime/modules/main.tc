@@ -1,0 +1,42 @@
+#include <stdio.h>
+import geo;
+@int limit = geo::scale + 1;
+@char word[] = "typed";
+int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+int @fibs(int n) { int t = 0; for (int i = 0; i < n; i++) { if (i == 3) continue; t += fib(i); } return t; }
+int @even(int n);
+int @odd(int n) { return n ? @even(n - 1) : 0; }
+int @even(int n) { return n ? @odd(n - 1) : 1; }
+int @classify(int n) { switch (n % 3) { case 0: return 10; case 1: n += 100; default: n++; } return n; }
+typedef<T, int N> struct { T items[N * limit]; } Buf<T, N>;
+T twice<T>(T v) { @int k = 2; return v * k; }
+int main(int argc, char** argv) {
+    geo::@Vec v = geo::@grow(geo::unit, limit);
+    geo::Vec w = v;
+    printf("%d %d %d %d\n", w.x, w.y, geo::@power(2, 10), @fibs(10));
+    @int n = 0;
+    for (@int i = 0; i < 5; i++) {
+        if (i == 2) continue;
+        if (argc > 5) printf("never %d\n", i);
+        n += i;
+        printf("pass %d\n", i);
+    }
+    do { n--; } while (n > 5);
+    while (n < 8) { n += 2; if (n == 7) break; }
+    switch (n) { case 7: printf("seven\n"); case 9: printf("nine\n"); break; default: printf("other\n"); }
+    Buf<int, 2> b;
+    char copy[] = word;
+    printf("%d %d %d %d %s %c %d\n", n, @odd(7), @even(7), (int)(sizeof b.items / sizeof(int)), copy, word[2], (int)sizeof(word));
+    printf("%d %d %d %g\n", @classify(3), @classify(4), @classify(5), twice(1.5) + twice(2));
+    return 0;
+}
+
+//> 4 4 1024 86
+//> pass 0
+//> pass 1
+//> pass 3
+//> pass 4
+//> seven
+//> nine
+//> 7 1 0 8 typed p 6
+//> 10 105 6 7

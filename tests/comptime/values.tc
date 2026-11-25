@@ -1,0 +1,98 @@
+#include <stdio.h>
+import builtin;
+
+typedef struct { int x; int y; } Point;
+typedef enum { IDLE, RUNNING, STOPPED = 5 } State;
+typedef<T, int N> struct { T items[N]; int used; } Stack<T, N>;
+typedef struct { Point* origin; State state; float scale; unsigned flags : 3; } Shape;
+
+trait Area { int area(Self self); }
+impl Area for Point { int area(Self self) { return self.x * self.y; } }
+
+int square(int v) { return v * v; }
+int twice<T>(T v) { return v + v; }
+
+// ordinary functions and methods run when '@' code calls them
+int @area_of(int w, int h) {
+    Point p = {w, h};
+    p.y += 1;
+    int total = 0;
+    int i = 0;
+    while (1) {
+        if (i >= 3) break;
+        total += square(i) + twice(i);
+        i++;
+    }
+    return p.area() + total;
+}
+
+double @half(double v) { return v / 2; }
+
+const char* @pick(int n) { return n > 2 ? "many" : "few"; }
+
+@Type @element<T>() { return @pointee<T>(); }
+
+void show_state(State s) {
+    const builtin::@Enumerator all[] = @enumerators<State>();
+    for (@int i = 0; i < 3; i++)
+        if (s == all[i].value) printf("state %s (%d)\n", all[i].name, (int)all[i].value);
+}
+
+void generics<X>(X* unused) {
+    builtin::@Generic first = @generics<X>()[0];
+    @Type t = first.type;
+    @type(t) zero = 0;
+    printf("%s: %s = %s, zero %d\n", @mangled<X>(), first.name, first.type_name, (int)zero);
+    printf("second: %s\n", @generics<X>()[1].value);
+}
+
+int main(void) {
+    @Point p = {.y = 4, .x = 3};
+    p.x = p.x * 10;
+    @type(@element<Point*>()) q = {p.x, p.y};
+    printf("%d %d, area %d, half %g, %s\n", q.x, q.y, @area_of(3, 4), @half(5), @pick(p.y));
+
+    @int total = 0;
+    for (@int i = 0; i < 4; i++) {
+        if (i == 1) continue;
+        for (@int j = 0; j < 4; j++) {
+            if (j > i) break;
+            total += i * j;
+        }
+        int local = i;
+        printf("row %d total %d\n", local, total);
+    }
+    @int n = 3;
+    while (n > 0) {
+        printf("%d... ", n);
+        n--;
+    }
+    printf("\n");
+
+    show_state(STOPPED);
+    Stack<double, 8> st = {0}; generics(&st);
+    printf("kinds %d %d %d\n", @kind<Shape>() == builtin::FieldKind::FIELD_STRUCT, (int)@kind<float>(), @count<Shape>());
+    for (@int i = 0; i < @count<Shape>(); i++) {
+        builtin::Field f = @fields<Shape>()[i];
+        printf("%s: %s, kind %d, bits %u\n", f.name, f.type_name, (int)f.kind, f.bits);
+    }
+    builtin::@Field s = @fields<Shape>()[2];
+    Shape shape = { .[s] = 1.5f, .state = RUNNING };
+    printf("scale %g\n", shape.[s]);
+    return 0;
+}
+
+//> 30 4, area 26, half 2.5, many
+//> row 0 total 0
+//> row 2 total 6
+//> row 3 total 24
+//> 3... 2... 1... 
+//> state STOPPED (5)
+//> Stack: T = double, zero 0
+//> second: 8
+//> kinds 1 13 4
+//> origin: Point*, kind 16, bits 0
+//> state: State, kind 20, bits 0
+//> scale: float, kind 13, bits 0
+//> flags: unsigned int, kind 8, bits 3
+//> scale 1.5

@@ -1,0 +1,4 @@
+// expect: undeclared identifier 'puts'
+import gen;
+gen::@uses_include();
+int main(void) { say(); return 0; }

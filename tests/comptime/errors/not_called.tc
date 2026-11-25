@@ -1,0 +1,3 @@
+// expect: '@one' is an '@' function: it can only be called, and has no address
+int @one() { return 1; }
+int main(void) { int (*f)(void) = @one; return f(); }

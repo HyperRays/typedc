@@ -1,0 +1,14 @@
+// expect: unimplemented_all.tc:9:55: error: this makes 'Q' implement 'Show'
+// both violations are reported, in source order: this checks the second
+trait Show { int show(Self self); }
+trait Other { int other(Self self); }
+typedef struct { int x; } P;
+typedef struct { int y; } Q;
+void @needs<T>() { if (@implements<T, Show>()) return; return; }
+void @late_p() { if (@implements<P, Other>()) return; @emit impl Show for P { int show(Self self) { return 1; } } }
+void @late_q() { if (@implements<Q, Other>()) return; @emit impl Show for Q { int show(Self self) { return 2; } } }
+@needs<P>();
+@needs<Q>();
+@late_q();
+@late_p();
+int main(void) { return 0; }

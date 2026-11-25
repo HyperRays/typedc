@@ -1,0 +1,52 @@
+// An '@' function that emits can be called from ordinary code. What needs the
+// emitted items waits for them, wherever in the program it is.
+#include <stdio.h>
+
+trait Show { void show(Self self); }
+impl Show for int { void show(Self self) { printf("%d", self); } }
+
+typedef struct { int x; int y; } Point;
+typedef struct { Point at; int size; } Mark;
+
+void @derive_show<T>() {
+    #include <stdio.h>
+    import builtin;
+    if (@implements<T, Show>()) return;
+    @emit impl Show for T {
+        void show(Self self) {
+            printf("%s(", @name<T>());
+            for (@int i = 0; i < @count<T>(); i++) {
+                if (i) printf(" ");
+                self.[@fields<T>()[i]].show();
+            }
+            printf(")");
+        }
+    }
+    for (int i = 0; i < @count<T>(); i++)
+        @derive_show<@fields<T>()[i].type>();
+}
+
+int @twice(int n) {
+    @emit int doubled(void) { return n * 2; }
+    return n * 2;
+}
+
+// main is generated before print<Mark>, whose body is what derives Show
+int main(void) {
+    Mark m = {{1, 2}, 3};
+    m.at.show();
+    printf("\n");
+    print(m);
+    printf("%d %d\n", @twice(21), doubled());
+    return 0;
+}
+
+void print<T>(T value) {
+    @derive_show<T>();
+    value.show();
+    printf("\n");
+}
+
+//> Point(1 2)
+//> Mark(Point(1 2) 3)
+//> 42 42

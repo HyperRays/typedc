@@ -1,0 +1,3 @@
+// expect: the arguments of an '@' call must be compile-time values or literals
+int @twice(int n) { return n * 2; }
+int main(int argc, char** argv) { return @twice(argc); }

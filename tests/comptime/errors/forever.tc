@@ -1,0 +1,2 @@
+// expect: this loop is still running at compile time after 1000000 passes
+int main(void) { @int n = 1; while (n) { } return 0; }

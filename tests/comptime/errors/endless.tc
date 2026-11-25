@@ -1,0 +1,3 @@
+// expect: compile-time calls are nested more than 200 deep: @down, called from @down
+int @down(int n) { return @down(n - 1); }
+int main(void) { return @down(3); }

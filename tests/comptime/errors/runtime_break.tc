@@ -1,0 +1,2 @@
+// expect: 'break' is decided at runtime here, but it would leave code that is run at compile time
+int main(int argc, char** argv) { for (@int i = 0; i < 3; i++) { if (argc > 1) break; } return 0; }

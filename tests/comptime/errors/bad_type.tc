@@ -1,0 +1,2 @@
+// expect: '@type(...)' needs a compile-time value of type '@Type'
+int main(void) { @int n = 1; @type(n) v = 0; return v; }

@@ -1,0 +1,7 @@
+// expect: undeclared identifier 'puts'
+void @hello() {
+    #include <stdio.h>
+    @emit void hello(void) { puts("hello"); }
+}
+@hello();
+int main(void) { hello(); puts("main"); return 0; }

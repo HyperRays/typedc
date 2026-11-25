@@ -1,0 +1,7 @@
+// expect: undeclared identifier 'missing'
+trait Show { int show(Self self); }
+trait Other { int other(Self self); }
+typedef struct { int x; } P;
+void @gen<T>() { @emit int broken(void) { return missing; } }
+@gen<int>();
+int main(void) { return broken(); }

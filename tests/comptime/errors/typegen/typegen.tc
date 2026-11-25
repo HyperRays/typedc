@@ -1,0 +1,3 @@
+pub void @tagged<T>() {
+    @emit pub typedef struct { T value; int tag; } Tagged;
+}

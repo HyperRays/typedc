@@ -1,0 +1,4 @@
+// expect: '.[...]' needs a compile-time 'builtin::Field' that came from '@fields'
+import builtin;
+typedef struct { int x; } P;
+int main(void) { P p = {1}; builtin::@Field f = {"x"}; return p.[f]; }

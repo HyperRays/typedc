@@ -1,0 +1,7 @@
+// expect: a variable of the '@' function that emitted this code
+trait Show { int show(Self self); }
+trait Other { int other(Self self); }
+typedef struct { int x; } P;
+void @gen() { int n = 1; @emit int g(void) { n++; return n; } }
+@gen();
+int main(void) { return g(); }

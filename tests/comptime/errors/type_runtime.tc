@@ -1,0 +1,2 @@
+// expect: a type cannot become a value of type 'int'
+int main(void) { @Type t = @pointee<int*>(); return (int)t; }

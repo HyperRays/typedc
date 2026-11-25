@@ -1,0 +1,4 @@
+// expect: unknown type name 'Tagged'
+// the type is declared where the generator is used, which is not here
+import typegen;
+int main(void) { Tagged t = {1, 2}; return t.tag; }

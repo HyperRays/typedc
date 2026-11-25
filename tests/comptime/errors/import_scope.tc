@@ -1,0 +1,4 @@
+// expect: unknown namespace
+typedef struct { int x; } P;
+int @count_of<T>() { import builtin; builtin::@Field f = @fields<T>()[0]; return @count<T>(); }
+int main(void) { builtin::Field f = {0}; return @count_of<P>(); }
