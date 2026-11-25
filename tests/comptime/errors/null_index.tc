@@ -1,0 +1,3 @@
+// expect: a null pointer is dereferenced at compile time
+int @run() { int* p = 0; return p[1]; }
+int main(void) { return @run(); }

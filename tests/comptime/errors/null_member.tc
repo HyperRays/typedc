@@ -1,0 +1,4 @@
+// expect: a null pointer is dereferenced at compile time
+typedef struct { int a; int b; int weight; } @Plan;
+int @run() { @Plan* p = 0; return p->weight; }
+int main(void) { return @run(); }

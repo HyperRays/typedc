@@ -1,0 +1,17 @@
+// Taking an address reads nothing, so it may be done through a null pointer:
+// the address of a member or element is then its offset (the offsetof idiom).
+// Reading or writing there fails (errors/null_member.tc, errors/null_index.tc).
+#include <stdio.h>
+#include <stddef.h>
+
+typedef struct { int a; int b; int weight; } Plan;
+
+size_t @offset_of_weight() { Plan* p = 0; return (size_t)&p->weight; }
+size_t @offset_of_third() { int* p = 0; return (size_t)&p[2]; }
+
+int main(void) {
+    printf("%d %d\n", (int)@offset_of_weight(), (int)@offset_of_third());
+    return 0;
+}
+
+//> 8 8
