@@ -78,9 +78,9 @@ int main(void) {
     @Point grid[2] = {{1, 2}, {3, 4}};
     grid[1] = @shift(grid[0], 100);
     printf("%d %d\n", grid[1].x, grid[1].y);
-    @unsigned long big = 1;
+    @unsigned long long big = 1;     // long has 32 bits on Windows
     big <<= 40;
-    printf("%lu\n", big);
+    printf("%llu\n", big);
     return 0;
 }
 
