@@ -963,9 +963,8 @@ static Type* macro_type(Entity* e) {
     if (!e->macro_body || !*e->macro_body) return e->type;
 
     Parser* p = (Parser*)xalloc(sizeof(Parser));
-    *p = parser_new(e->macro_body);
+    *p = parser_new_header(e->macro_body);
     p->filename = "<macro>";
-    p->header_mode = 1;
     p->env = e->file;
     p->lookup_type = env_lookup_type;
     parser_skip_noise(p);
@@ -2412,10 +2411,12 @@ static void gen_stmt(Ctx* c, Expr* e, Buf* out, int ind) {
 // Constant evaluation (for the identity of constant generic arguments)
 // ---------------------------------------------------------------------------
 
-// The value of one enumerator of an enum written in Typed C
+// The value of one enumerator of an enum, written in Typed C or in a C header.
+// Returns 0 when its value is not an integer constant expression that
+// const_eval can work out.
 static int enum_value(Type* t, const char* name, long long* out) {
     Type* u = type_unq(t);
-    if (!u->body || u->from_c) return 0;
+    if (!u->body) return 0;
     Ctx c = ctx_for_file(u->file);
     c.tenv = u->tenv;
     long long current = -1;

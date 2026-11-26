@@ -48,11 +48,14 @@ static const char *const keywords[] = {
     "_Static_assert","_Thread_local",
     "_Bool","_Complex",
 
-    // language extensions
+    // language extensions: keep last, see EXTENSION_KEYWORDS
     "pub", "import", "trait", "impl"
 };
 
 static const size_t keywords_size = sizeof(keywords) / sizeof(keywords[0]);
+
+// How many of `keywords` are Typed C's own. In C text they are names.
+#define EXTENSION_KEYWORDS 4
 
 
 
@@ -128,6 +131,9 @@ typedef struct {
 
     size_t row;
     size_t col;
+
+    // C text (headers, macro bodies): Typed C's own keywords are plain names
+    int c_only;
 } Lexer;
 
 static inline Lexer lexer_new(const char* source) {
@@ -218,9 +224,10 @@ static inline size_t lexer_matcher(Lexer* lexer, const char* text) {
     return 0;
 }
 
-static inline int is_keyword(const char *start, size_t length) {
+static inline int is_keyword(const char *start, size_t length, int c_only) {
+    size_t count = c_only ? keywords_size - EXTENSION_KEYWORDS : keywords_size;
     for (size_t i = 0;
-         i < keywords_size;
+         i < count;
          i++) {
 
         size_t n = strlen(keywords[i]);
@@ -239,6 +246,11 @@ static inline int token_is(Token token, const char *text) {
 
     return token.length == length &&
            memcmp(token.start, text, length) == 0;
+}
+
+// Whether two tokens are spelled the same
+static inline int token_same(Token a, Token b) {
+    return a.length == b.length && memcmp(a.start, b.start, a.length) == 0;
 }
 
 // A '#' starts a directive only when nothing but blanks precede it on its line.
@@ -480,7 +492,7 @@ static inline Token lexer_scan(Lexer* lexer) {
             lexer, TK_IDENT, start, row, col
         );
 
-        if (is_keyword(token.start, token.length)) {
+        if (is_keyword(token.start, token.length, lexer->c_only)) {
             token.kind = TK_KEYWORD;
         }
 
