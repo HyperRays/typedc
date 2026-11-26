@@ -320,6 +320,19 @@ static inline Parser parser_new(const char* source) {
     };
 }
 
+// A parser for preprocessed C (headers, macro bodies): it skips compiler noise,
+// recovers per declaration, and reads Typed C's own keywords as names
+static inline Parser parser_new_header(const char* source) {
+    Lexer lex = lexer_new(source);
+    lex.c_only = 1;
+    Token token = lexer_next(&lex);
+    return (Parser) {
+        .lexer = lex,
+        .token = token,
+        .header_mode = 1
+    };
+}
+
 static inline const char* token_describe(Token tok, char* buffer, size_t size) {
     if (tok.kind == TK_EOF) return "end of file";
     size_t n = tok.length;
@@ -708,7 +721,7 @@ static inline int parser_lookup_local(Parser* p, Token name) {
     return -1;
 }
 
-static inline int parser_is_type_path(Parser* p, const Token* segments, int count) {
+static inline int is_type_path(Parser* p, const Token* segments, int count) {
     if (count == 1) {
         int local = parser_lookup_local(p, segments[0]);
         if (local >= 0) return local == 1;
@@ -730,8 +743,8 @@ static inline int token_is_type_keyword(Token tok) {
 }
 
 // The syntax of compile-time code (comptime.h)
-static inline void parser_ct_name(Parser* p);
-static inline int parser_at_ct_type(Parser* p);
+static inline void ct_name(Parser* p);
+static inline int at_ct_type(Parser* p);
 static inline int parse_ct_mark(Parser* p);
 static inline Expr* parse_ct_spec(Parser* p, int* quals);
 static inline Expr* parse_ct_block_item(Parser* p);
@@ -742,10 +755,10 @@ static inline void parse_ct_skip_body(Parser* p, Expr* def);
 
 // Does the current token start a type name? A qualified name counts only when
 // the whole path names a type, so `Color::Red` stays an expression.
-static inline int parser_at_type(Parser* p) {
+static inline int at_type(Parser* p) {
     Token tok = p->token;
     if (tok.kind == TK_KEYWORD) return token_is_type_keyword(tok);
-    if (token_punct(tok, "@")) return parser_at_ct_type(p);
+    if (token_punct(tok, "@")) return at_ct_type(p);
     if (tok.kind != TK_IDENT) return 0;
 
     Token segments[8]; int count = 0;
@@ -759,10 +772,10 @@ static inline int parser_at_type(Parser* p) {
         if (next.kind != TK_IDENT || count >= 8) return 0;
         segments[count++] = next;
     }
-    return parser_is_type_path(p, segments, count);
+    return is_type_path(p, segments, count);
 }
 
-static inline int parser_at_declaration(Parser* p) {
+static inline int at_declaration(Parser* p) {
     static const char* const words[] = {
         "typedef", "extern", "static", "auto", "register", "_Thread_local",
         "inline", "_Noreturn", "_Alignas", "_Static_assert"
@@ -771,14 +784,14 @@ static inline int parser_at_declaration(Parser* p) {
     if (tok.kind == TK_KEYWORD)
         for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
             if (token_is(tok, words[i])) return 1;
-    return parser_at_type(p);
+    return at_type(p);
 }
 
 // Is the token after the current '(' the start of a type name?
-static inline int parser_paren_starts_type(Parser* p) {
+static inline int paren_starts_type(Parser* p) {
     parser_push_snapshot(p);
     parser_advance(p);
-    int result = parser_at_type(p);
+    int result = at_type(p);
     parser_pop_snapshot(p);
     return result;
 }
@@ -819,7 +832,7 @@ static inline void parser_skip_until(Parser* p, const char* stops) {
 }
 
 // Header recovery: drop the rest of a declaration the parser could not read
-static inline void parser_skip_declaration(Parser* p) {
+static inline void skip_declaration(Parser* p) {
     int depth = 0;
     int after_paren = 0;
     for (;;) {
@@ -897,8 +910,8 @@ typedef enum {
     P_DISCARD,              // discard topmost stack expr
     P_PUSH_SNAPSHOT,        // push lexer snapshot to parser
     P_POP_SNAPSHOT,         // pop lexer snapshot to parser
-    P_BIF,                  // branch if token
-    P_BIFN,                 // branch if not token
+    P_BIF,                  // branch if [token]
+    P_BIFN,                 // branch if not [token]
     P_ISTACK,               // interact with the stack directly
 
     P_FSTACK,               // debug print the stack
@@ -1091,8 +1104,45 @@ static inline Expr* parse_initializer(Parser* p);
 static inline Expr* parse_type_name(Parser* p);
 static inline Expr* parse_type_args(Parser* p);
 static inline Expr* parse_decl_specifiers(Parser* p, int* storage, int allow_storage);
+static inline Expr* parse_struct_specifier(Parser* p);
+static inline Expr* parse_struct_keyword(Parser* p);
+static inline Expr* parse_tag(Parser* p);
+static inline Expr* parse_struct_members(Parser* p);
+static inline void  istack_tag_specifier(Expr* context, Expr* stack[256], size_t* idx);
+static inline void  check_tag_specifier(Parser* p, Expr* spec);
+static inline Expr* parse_enum_specifier(Parser* p);
+static inline Expr* parse_enumerators(Parser* p);
 static inline Expr* parse_declaration(Parser* p, int context, int pub);
 static inline Expr* parse_static_assert(Parser* p);
+static inline Expr* parse_static_assert_message(Parser* p);
+
+static inline Expr* parse_trait(Parser* p, int pub);
+static inline Expr* parse_trait_name(Parser* p);
+static inline Expr* parse_trait_members(Parser* p);
+static inline Expr* parse_trait_member(Parser* p);
+static inline Expr* parse_trait_prec(Parser* p);
+static inline Expr* parse_trait_prototype(Parser* p);
+static inline void  istack_trait_member(Expr* context, Expr* stack[256], size_t* idx);
+static inline void  istack_trait(Expr* context, Expr* stack[256], size_t* idx);
+
+static inline Expr* parse_impl(Parser* p);
+static inline Expr* parse_impl_prescan(Parser* p);
+static inline Expr* parse_method(Parser* p);
+static inline Expr* parse_method_definition(Parser* p);
+static inline void  istack_method(Expr* context, Expr* stack[256], size_t* idx);
+static inline Expr* parse_impl_methods(Parser* p);
+static inline void  istack_impl(Expr* context, Expr* stack[256], size_t* idx);
+
+static inline Expr* parse_generic_typedef(Parser* p, int pub);
+static inline Expr* parse_generic_typedef_declarator(Parser* p);
+static inline void  istack_generic_typedef(Expr* context, Expr* stack[256], size_t* idx);
+static inline void  check_repeated_params(Parser* p, Expr* def);
+
+static inline Expr* parse_import(Parser* p);
+static inline Expr* parse_import_path(Parser* p);
+static inline Expr* parse_import_alias(Parser* p);
+static inline void  istack_import(Expr* context, Expr* stack[256], size_t* idx);
+
 static inline Expr* parse_external_declaration(Parser* p);
 static inline Expr* parse_translation_unit(Parser* p);
 
@@ -1164,7 +1214,7 @@ static inline Expr* parse_for_cond(Parser* p) {
 // First clause of a for statement: a declaration or an optional expression.
 // Either way the terminating ';' is consumed here.
 static inline Expr* parse_for_init(Parser* p) {
-    if (parser_at_declaration(p))
+    if (at_declaration(p))
         return parse_declaration(p, 1, 0);
     Expr* expr = parse_for_cond(p);
     parser_expect(p, ";");
@@ -1183,11 +1233,12 @@ static inline void istack_for_cond(Expr* context, Expr* stack[256], size_t* idx)
 
 static const ParseRule for_rule[] = {
     TOK("for", E_FOR),
-    POP,
+    POP, // Pops the "for" token from stack into context
 
     // (...;...;...)
     EXPECT("("),
         REC(parse_for_init),
+        // ";" consumed in parse_for_init
         REC(parse_for_cond),
         EXPECT(";"),
         REC(parse_for_cond),
@@ -1406,8 +1457,8 @@ static inline Expr* parse_label(Parser* p){
 }
 // END goto and labels
 
-// A raw block followed by one of these is an operand, not a statement
-static inline int parser_raw_continues_expression(Parser* p) {
+// A raw block (#{...}#) followed by one of these is an operand, not a statement
+static inline int raw_continues_expression(Parser* p) {
     static const char* const infix[] = {
         "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=",
         ".", "->", "[", "?", "==", "!=", "<", ">", "<=", ">=", "<<", ">>",
@@ -1489,7 +1540,7 @@ static inline Expr* parse_statement_inner(Parser* p) {
         return expr_new(E_ALL, tok, NULL, NULL);
     }
 
-    if (tok.kind == TK_RAW && !parser_raw_continues_expression(p)) {
+    if (tok.kind == TK_RAW && !raw_continues_expression(p)) {
         parser_advance(p);
         return expr_new(E_RAW, tok, NULL, NULL);
     }
@@ -1520,7 +1571,7 @@ static inline Expr* parse_block_item(Parser* p) {
     // `name:` is a label even when the name is also a type
     if (tok.kind == TK_IDENT && token_punct(parser_peek2(p), ":"))
         return parse_label(p);
-    if (parser_at_declaration(p))
+    if (at_declaration(p))
         return parse_declaration(p, 1, 0);
     // `Name name` can only be a declaration, so Name was meant as a type
     if (tok.kind == TK_IDENT && parser_peek2(p).kind == TK_IDENT) {
@@ -1653,7 +1704,7 @@ static inline Expr* parse_prefix(Parser* p) {
     if (token_kw(tok, "sizeof")) {
         parser_advance(p);
         Token open = parser_peek(p);
-        if (token_punct(open, "(") && parser_paren_starts_type(p)) {
+        if (token_punct(open, "(") && paren_starts_type(p)) {
             parser_advance(p);
             Expr* type = parse_type_name(p);
             parser_expect(p, ")");
@@ -1679,7 +1730,7 @@ static inline Expr* parse_prefix(Parser* p) {
     }
 
     // A parenthesized type name starts a cast or a compound literal
-    if (token_punct(tok, "(") && parser_paren_starts_type(p)) {
+    if (token_punct(tok, "(") && paren_starts_type(p)) {
         parser_advance(p);
         Expr* type = parse_type_name(p);
         parser_expect(p, ")");
@@ -1708,7 +1759,7 @@ static inline Expr* parse_prefix(Parser* p) {
 // A list holding a constant argument (`f<4>`) is only accepted when
 // `allow_const` says the name before it is generic: otherwise `a < 4 > (b)`
 // could never be a comparison again.
-static inline Expr* parser_try_type_args(Parser* p, int require_call, int allow_const) {
+static inline Expr* try_type_args(Parser* p, int require_call, int allow_const) {
     jmp_buf attempt;
     int const_args = p->const_args;
     int snapshot = p->snapshot_idx;
@@ -1741,7 +1792,7 @@ static inline Expr* parser_try_type_args(Parser* p, int require_call, int allow_
 
 // A call argument is an expression, or a type for macros such as va_arg
 static inline Expr* parse_argument(Parser* p) {
-    if (parser_at_type(p)) {
+    if (at_type(p)) {
         Expr* arg = expr_new(E_TYPEARG, parser_peek(p), NULL, NULL);
         arg->type = parse_type_name(p);
         return arg;
@@ -1800,7 +1851,7 @@ static inline Expr* parse_postfix_from(Parser* p, Expr* left) {
             if (!parse_ct_member(p, member)) member->name = parser_expect_ident(p, "a member name");
             // value.method<T>(args): type arguments need the call right behind them
             if (token_is(tok, ".") && token_punct(parser_peek(p), "<"))
-                member->generics = parser_try_type_args(p, 1,
+                member->generics = try_type_args(p, 1,
                     p->lookup_generic && p->lookup_generic(p->env, &member->name, 1, 1));
             left = member;
             continue;
@@ -1816,7 +1867,7 @@ static inline Expr* parse_ident_node(Parser* p) {
 }
 
 static inline Expr* parse_primary(Parser* p) {
-    parser_ct_name(p);
+    ct_name(p);
     Token tok = parser_peek(p);
 
     if (token_punct(tok, "(")) {
@@ -1838,7 +1889,7 @@ static inline Expr* parse_primary(Parser* p) {
                 expr_push(expr, expr_new(E_IDENT, tok, NULL, NULL));
                 while (token_punct(parser_peek(p), "::")) {
                     parser_advance(p);
-                    parser_ct_name(p);
+                    ct_name(p);
                     Token segment = parser_expect_ident(p, "a name after '::'");
                     expr_push(expr, expr_new(E_IDENT, segment, NULL, NULL));
                 }
@@ -1852,7 +1903,7 @@ static inline Expr* parse_primary(Parser* p) {
                 if (expr->kind == E_IDENT) segments[count++] = tok;
                 for (size_t i = 0; i < expr->blockstmt_size && count < 8; i++)
                     segments[count++] = expr->blockstmt[i]->token;
-                expr->generics = parser_try_type_args(p, 0, *segments[count - 1].start == '@' ||    // an '@' function
+                expr->generics = try_type_args(p, 0, *segments[count - 1].start == '@' ||    // an '@' function
                     (p->lookup_generic && p->lookup_generic(p->env, segments, count, 0)));
             }
             return expr;
@@ -1995,7 +2046,7 @@ static inline int token_builtin(Token tok) {
 }
 
 // Close a `<...>` list. A `>>` closing two nested lists is split in place.
-static inline void parser_expect_close_angle(Parser* p) {
+static inline void expect_close_angle(Parser* p) {
     Token tok = parser_peek(p);
     if (token_punct(tok, ">")) {
         parser_advance(p);
@@ -2018,7 +2069,7 @@ static inline void parser_expect_close_angle(Parser* p) {
 // the list that declares it) is kept as an expression; the compiler decides
 // from the parameter it is passed for.
 static inline Expr* parse_generic_arg(Parser* p) {
-    if (parser_at_type(p)) return parse_type_name(p);
+    if (at_type(p)) return parse_type_name(p);
     if (p->prescan) {
         Expr* skipped = expr_new(E_ALL, parser_peek(p), NULL, NULL);
         for (int depth = 0;;) {
@@ -2082,7 +2133,7 @@ static inline Expr* parse_type_args(Parser* p) {
         if (!token_punct(parser_peek(p), ",")) break;
         parser_advance(p);
     }
-    parser_expect_close_angle(p);
+    expect_close_angle(p);
     return args;
 }
 
@@ -2119,8 +2170,7 @@ static inline Expr* parse_generic_params(Parser* p) {
         Expr* const_type = is_type ? NULL : parse_decl_specifiers(p, NULL, 0);
         Token name = parser_expect_ident(p, "a generic parameter name");
         for (size_t i = 0; i < params->blockstmt_size; i++)
-            if (params->blockstmt[i]->name.length == name.length &&
-                memcmp(params->blockstmt[i]->name.start, name.start, name.length) == 0)
+            if (token_same(params->blockstmt[i]->name, name))
                 parser_fail(p, name, "duplicate generic parameter '%.*s'", (int)name.length, name.start);
         Expr* param = expr_new(E_GENERIC_PARAM, name, NULL, NULL);
         param->name = name;
@@ -2138,12 +2188,10 @@ static inline Expr* parse_generic_params(Parser* p) {
         if (!token_punct(parser_peek(p), ",")) break;
         parser_advance(p);
     }
-    parser_expect_close_angle(p);
+    expect_close_angle(p);
     return params;
 }
 
-static inline Expr* parse_struct_specifier(Parser* p);
-static inline Expr* parse_enum_specifier(Parser* p);
 static inline Expr* parse_declarator(Parser* p, Expr* base, DeclInfo* info, int mode);
 
 // declaration-specifiers / specifier-qualifier-list. Returns the type the
@@ -2191,7 +2239,7 @@ static inline Expr* parse_decl_specifiers(Parser* p, int* storage, int allow_sto
                     parser_expect(p, ")");
                 } else {
                     parser_expect(p, "(");
-                    if (parser_at_type(p)) a->type = parse_type_name(p);
+                    if (at_type(p)) a->type = parse_type_name(p);
                     else a->left = parse_constant_expression(p);
                     parser_expect(p, ")");
                 }
@@ -2221,7 +2269,7 @@ static inline Expr* parse_decl_specifiers(Parser* p, int* storage, int allow_sto
         // The first identifier of a declaration is its type; a later one is the
         // name being declared.
         if (tok.kind == TK_IDENT && !spec && !mask) {
-            if (p->strict_types && !parser_at_type(p))
+            if (p->strict_types && !at_type(p))
                 parser_fail(p, tok, "unknown type name '%.*s'", (int)tok.length, tok.start);
             spec = parse_typedef_name(p);
             continue;
@@ -2313,89 +2361,170 @@ static inline void parse_tag_namespace(Parser* p, Expr* spec) {
     spec->name = parser_expect_ident(p, "a tag name");
 }
 
-// struct-specifier / union-specifier
-static inline Expr* parse_struct_specifier(Parser* p) {
+// Struct / union specifier
+//
+// struct-specifier = ( "struct" | "union" ) [ tag ] [ "{" { struct-member } "}" ]
+// tag              = IDENT [ "::" IDENT ]
+// E_TY_STRUCT: name = tag, left = namespace of the tag, blockstmt = members,
+// flags = F_UNION, F_HAS_BODY
+
+// The keyword: the E_TY_STRUCT, with F_UNION for a union
+static inline Expr* parse_struct_keyword(Parser* p) {
     Token keyword = parser_peek(p);
     parser_advance(p);
     Expr* spec = expr_new(E_TY_STRUCT, keyword, NULL, NULL);
     if (token_is(keyword, "union")) spec->flags |= F_UNION;
-    parser_ct_name(p);      // the tag can be made by @ident
-    if (parser_peek(p).kind == TK_IDENT) {
-        spec->name = parser_peek(p);
-        parser_advance(p);
-        parse_tag_namespace(p, spec);
-    }
-    if (token_punct(parser_peek(p), "{")) {
-        if (spec->left)
-            parser_fail(p, spec->name, "a tag is defined in its own namespace: remove '%.*s::'",
-                        (int)spec->left->token.length, spec->left->token.start);
-        parser_advance(p);
-        spec->flags |= F_HAS_BODY;
-        Expr* prev = NULL;
-        while (!token_punct(parser_peek(p), "}")) {
-            if (parser_peek(p).kind == TK_EOF) set_parser_error(p, PERR_OPEN_CBRACK);
-            Token start = parser_peek(p);
-            size_t first = spec->blockstmt_size;
-            parse_struct_member(p, spec);
-            parser_take_trivia(p, prev, start, spec->blockstmt[first], NULL);
-            prev = spec->blockstmt[spec->blockstmt_size - 1];
-        }
-        parser_take_trivia(p, prev, parser_peek(p), NULL, spec);
-        parser_advance(p);
-    } else if (!spec->name.length) {
-        parser_fail(p, parser_peek(p), "expected a tag or '{' after '%.*s'", (int)keyword.length, keyword.start);
-    }
+    ct_name(p);      // the tag can be made by @ident
     return spec;
 }
 
-// enum-specifier
-static inline Expr* parse_enum_specifier(Parser* p) {
-    Token keyword = parser_peek(p);
+// The tag of a struct, union or enum: an E_IDENT with name = the tag and
+// left = its namespace, or an E_ALL placeholder when there is none
+static inline Expr* parse_tag(Parser* p) {
+    Token tok = parser_peek(p);
+    if (tok.kind != TK_IDENT) return expr_new(E_ALL, tok, NULL, NULL);
     parser_advance(p);
-    Expr* spec = expr_new(E_TY_ENUM, keyword, NULL, NULL);
-    if (parser_peek(p).kind == TK_IDENT) {
-        spec->name = parser_peek(p);
-        parser_advance(p);
-        parse_tag_namespace(p, spec);
+    Expr* tag = expr_new(E_IDENT, tok, NULL, NULL);
+    tag->name = tok;
+    parse_tag_namespace(p, tag);
+    return tag;
+}
+
+// The members between the braces, collected in an E_LIST, which also takes the
+// comments before the closing brace
+static inline Expr* parse_struct_members(Parser* p) {
+    Expr* members = expr_new(E_LIST, parser_peek(p), NULL, NULL);
+    Expr* prev = NULL;
+    while (!token_punct(parser_peek(p), "}")) {
+        if (parser_peek(p).kind == TK_EOF) set_parser_error(p, PERR_OPEN_CBRACK);
+        Token start = parser_peek(p);
+        size_t first = members->blockstmt_size;
+        parse_struct_member(p, members);
+        parser_take_trivia(p, prev, start, members->blockstmt[first], NULL);
+        prev = members->blockstmt[members->blockstmt_size - 1];
     }
-    if (token_punct(parser_peek(p), "{")) {
-        if (spec->left)
-            parser_fail(p, spec->name, "a tag is defined in its own namespace: remove '%.*s::'",
-                        (int)spec->left->token.length, spec->left->token.start);
-        parser_advance(p);
-        spec->flags |= F_HAS_BODY;
-        Expr* prev = NULL;
-        for (;;) {
-            Token name = parser_expect_ident(p, "an enumerator name");
-            Expr* item = expr_new(E_ENUMERATOR, name, NULL, NULL);
-            item->name = name;
-            parser_take_trivia(p, prev, name, item, NULL);
-            prev = item;
-            if (token_punct(parser_peek(p), "=")) {
-                Token eq = parser_peek(p);
-                parser_advance(p);
-                if (p->prescan) {
-                    parser_skip_until(p, ",");
-                    item->left = expr_new(E_ALL, eq, NULL, NULL);
-                } else {
-                    item->left = parse_constant_expression(p);
-                    if (p->constants && item->left && item->left->source.start) list_push(p->constants, item->left);
-                }
-            }
-            // enumerators are ordinary identifiers and hide type names
-            parser_declare(p, name, 0);
-            expr_push(spec, item);
-            if (!token_punct(parser_peek(p), ",")) break;
-            parser_advance(p);
-            if (token_punct(parser_peek(p), "}")) break;
-        }
-        parser_take_trivia(p, prev, parser_peek(p), NULL, spec);
-        parser_expect(p, "}");
-    } else if (!spec->name.length) {
-        parser_fail(p, parser_peek(p), "expected a tag or '{' after 'enum'");
+    parser_take_trivia(p, prev, parser_peek(p), NULL, members);
+    return members;
+}
+
+// context: the specifier; stack: tag [ body ]
+// The tag is an E_IDENT, or an E_ALL when there is none; the body, when there
+// is one, the E_LIST of the members. Shared by structs, unions and enums.
+static inline void istack_tag_specifier(Expr* context, Expr* stack[256], size_t* idx) {
+    Expr* tag = stack[0];
+    if (tag->kind == E_IDENT) {
+        context->name = tag->name;
+        context->left = tag->left;
     }
+    if (*idx == 2) {
+        Expr* body = stack[1];
+        context->flags               |= F_HAS_BODY;
+        context->blockstmt            = body->blockstmt;
+        context->blockstmt_size       = body->blockstmt_size;
+        context->alloc_blockstmt_size = body->alloc_blockstmt_size;
+        context->inner                = body->inner;
+        context->inner_len            = body->inner_len;
+    }
+}
+
+static const ParseRule struct_rule[] = {
+    REC(parse_struct_keyword),
+    POP,
+    REC(parse_tag),
+
+    // { ... }
+    BIF("{"),
+        EXPECT("{"),
+        REC(parse_struct_members),
+        EXPECT("}"),
+        POP, // put into return context
+    END,
+
+    ISTACK(istack_tag_specifier),
+    END
+};
+
+// A specifier has a tag, a body or both, and a body only with a tag of this
+// namespace. Shared by structs, unions and enums.
+static inline void check_tag_specifier(Parser* p, Expr* spec) {
+    if ((spec->flags & F_HAS_BODY) && spec->left)
+        parser_fail(p, spec->name, "a tag is defined in its own namespace: remove '%.*s::'",
+                    (int)spec->left->token.length, spec->left->token.start);
+    if (!(spec->flags & F_HAS_BODY) && !spec->name.length)
+        parser_fail(p, parser_peek(p), "expected a tag or '{' after '%.*s'", (int)spec->token.length, spec->token.start);
+}
+
+static inline Expr* parse_struct_specifier(Parser* p) {
+    Expr* spec = parse_rule(p, struct_rule);
+    if (spec) check_tag_specifier(p, spec);
     return spec;
 }
+
+// END Struct / union specifier
+
+// Enum specifier
+//
+// enum-specifier = "enum" [ tag ] [ "{" enumerator { "," enumerator } [ "," ] "}" ]
+// enumerator     = IDENT [ "=" constant-expression ]
+// E_TY_ENUM: name = tag, left = namespace of the tag, blockstmt = E_ENUMERATOR
+
+// The enumerators between the braces, collected in an E_LIST, which also takes
+// the comments before the closing brace
+static inline Expr* parse_enumerators(Parser* p) {
+    Expr* list = expr_new(E_LIST, parser_peek(p), NULL, NULL);
+    Expr* prev = NULL;
+    for (;;) {
+        Token name = parser_expect_ident(p, "an enumerator name");
+        Expr* item = expr_new(E_ENUMERATOR, name, NULL, NULL);
+        item->name = name;
+        parser_take_trivia(p, prev, name, item, NULL);
+        prev = item;
+        if (token_punct(parser_peek(p), "=")) {
+            Token eq = parser_peek(p);
+            parser_advance(p);
+            if (p->prescan) {
+                parser_skip_until(p, ",");
+                item->left = expr_new(E_ALL, eq, NULL, NULL);
+            } else {
+                item->left = parse_constant_expression(p);
+                if (p->constants && item->left && item->left->source.start) list_push(p->constants, item->left);
+            }
+        }
+        // enumerators are ordinary identifiers and hide type names
+        parser_declare(p, name, 0);
+        expr_push(list, item);
+        if (!token_punct(parser_peek(p), ",")) break;
+        parser_advance(p);
+        if (token_punct(parser_peek(p), "}")) break;
+    }
+    parser_take_trivia(p, prev, parser_peek(p), NULL, list);
+    return list;
+}
+
+static const ParseRule enum_rule[] = {
+    TOK("enum", E_TY_ENUM),
+    POP,
+    REC(parse_tag),
+
+    // { ... }
+    BIF("{"),
+        EXPECT("{"),
+        REC(parse_enumerators),
+        EXPECT("}"),
+        POP, // put into return context
+    END,
+
+    ISTACK(istack_tag_specifier),
+    END
+};
+
+static inline Expr* parse_enum_specifier(Parser* p) {
+    Expr* spec = parse_rule(p, enum_rule);
+    if (spec) check_tag_specifier(p, spec);
+    return spec;
+}
+
+// END Enum specifier
 
 // The parameter list of a function declarator; the '(' has been consumed
 static inline void parse_parameters(Parser* p, Expr* fn) {
@@ -2476,7 +2605,7 @@ static inline Expr* parse_declarator_suffixes(Parser* p, Expr* base) {
 }
 
 // Is the current '(' a parenthesized declarator rather than a parameter list?
-static inline int parser_paren_is_grouping(Parser* p, int mode) {
+static inline int paren_is_grouping(Parser* p, int mode) {
     Token next = parser_peek2(p);
     if (token_punct(next, "*") || token_punct(next, "(") || token_punct(next, "[")) return 1;
     if (next.kind == TK_DOTOP) return 1;
@@ -2485,7 +2614,7 @@ static inline int parser_paren_is_grouping(Parser* p, int mode) {
         // in a parameter or type name, `(T)` is a parameter list when T is a type
         parser_push_snapshot(p);
         parser_advance(p);
-        int is_type = parser_at_type(p);
+        int is_type = at_type(p);
         parser_pop_snapshot(p);
         return !is_type;
     }
@@ -2503,7 +2632,7 @@ static inline Expr* parse_declarator(Parser* p, Expr* base, DeclInfo* info, int 
             base->flags |= q;
     }
 
-    parser_ct_name(p);      // an '@' function, a compile-time type, or a name made by @ident
+    ct_name(p);      // an '@' function, a compile-time type, or a name made by @ident
     Token tok = parser_peek(p);
     int kind = mode & DM_KIND;
     Expr* hole = NULL;
@@ -2525,14 +2654,14 @@ static inline Expr* parse_declarator(Parser* p, Expr* base, DeclInfo* info, int 
                     if (!token_punct(parser_peek(p), ",")) break;
                     parser_advance(p);
                 }
-                parser_expect_close_angle(p);
+                expect_close_angle(p);
                 info->generics = names;
             } else {
                 parser_fail(p, parser_peek(p), "'%.*s' cannot declare generic parameters: only functions, methods and generic typedefs can",
                             (int)tok.length, tok.start);
             }
         }
-    } else if (token_punct(tok, "(") && parser_paren_is_grouping(p, mode)) {
+    } else if (token_punct(tok, "(") && paren_is_grouping(p, mode)) {
         parser_advance(p);
         hole = expr_new(E_TY_HOLE, tok, NULL, NULL);
         inner = parse_declarator(p, hole, info, mode);
@@ -2563,29 +2692,48 @@ static inline Expr* parse_type_name(Parser* p) {
 // Declarations
 // ---------------------------------------------------------------------------
 
+// Static assertion
+//
 // static-assert = "_Static_assert" "(" constant-expression "," STRING ")" ";"
+// E_STATIC_ASSERT: left = condition, right = message
+
+// The message: a string literal
+static inline Expr* parse_static_assert_message(Parser* p) {
+    if (parser_peek(p).kind != TK_STR)
+        parser_fail(p, parser_peek(p), "expected a string literal in '_Static_assert'");
+    return parse_primary(p);
+}
+
+static const ParseRule static_assert_rule[] = {
+    TOK("_Static_assert", E_STATIC_ASSERT),
+    POP,
+
+    // (...)
+    EXPECT("("),
+    REC(parse_constant_expression),
+    EXPECT(","),
+    REC(parse_static_assert_message),
+    EXPECT(")"),
+    EXPECT(";"),
+
+    RIGHT,
+    LEFT,
+    END
+};
+
 static inline Expr* parse_static_assert(Parser* p) {
-    Token tok = parser_peek(p);
+    if (!p->prescan) return parse_rule(p, static_assert_rule);
+    // the prescan only collects names: the condition may use names it does not know yet
+    Expr* check = expr_new(E_STATIC_ASSERT, parser_peek(p), NULL, NULL);
     parser_advance(p);
-    Expr* check = expr_new(E_STATIC_ASSERT, tok, NULL, NULL);
     parser_expect(p, "(");
-    if (p->prescan) {
-        parser_skip_until(p, ")");
-    } else {
-        check->left = parse_constant_expression(p);
-        parser_expect(p, ",");
-        if (parser_peek(p).kind != TK_STR)
-            parser_fail(p, parser_peek(p), "expected a string literal in '_Static_assert'");
-        check->right = parse_primary(p);
-    }
+    parser_skip_until(p, ")");
     parser_expect(p, ")");
     parser_expect(p, ";");
     return check;
 }
 
-static inline int token_same(Token a, Token b) {
-    return a.length == b.length && memcmp(a.start, b.start, a.length) == 0;
-}
+// END Static assertion
 
 // Finish a function definition whose declarator has been read: declare the
 // parameters, then parse (or skip) the body.
@@ -2691,7 +2839,7 @@ static inline Expr* parse_declaration(Parser* p, int context, int pub) {
 }
 
 // A method's receiver is its first parameter and is named `self`
-static inline void parser_check_receiver(Parser* p, Expr* fn, Token name) {
+static inline void check_receiver(Parser* p, Expr* fn, Token name) {
     if (!fn->blockstmt_size || !token_is(fn->blockstmt[0]->name, "self"))
         parser_fail(p, name, "the first parameter of method '%.*s' must be the receiver, named 'self' with an explicit type",
                     (int)name.length, name.start);
@@ -2703,88 +2851,189 @@ static inline void parser_check_receiver(Parser* p, Expr* fn, Token name) {
                     (int)name.length, name.start);
 }
 
-// trait-member: a method prototype, optionally a dotted operator with @prec
-static inline Expr* parse_trait_member(Parser* p) {
-    Token start = parser_peek(p);
-    int prec = 0;
-    if (token_punct(start, "@")) {
-        parser_advance(p);
-        if (!token_ident(parser_peek(p), "prec"))
-            parser_fail(p, parser_peek(p), "unknown annotation; expected '@prec(left_bp, right_bp)'");
-        parser_advance(p);
-        parser_expect(p, "(");
-        int bp[2];
-        for (int i = 0; i < 2; i++) {
-            Token num = parser_peek(p);
-            char* end = NULL;
-            long value = num.kind == TK_PP_NUM ? strtol(num.start, &end, 0) : -1;
-            if (num.kind != TK_PP_NUM || end != num.start + num.length || value < 0 || value > 0x7fff)
-                parser_fail(p, num, "'@prec' takes two integer literals");
-            bp[i] = (int)value;
-            parser_advance(p);
-            if (i == 0) parser_expect(p, ",");
-        }
-        parser_expect(p, ")");
-        prec = (1 << 30) | (bp[0] << 15) | bp[1];
-    }
 
+// Trait
+//
+// trait-declaration = "trait" [ generic-parameters ] IDENT "{" { trait-member } "}" [ ";" ]
+
+// The name after `trait`
+static inline Expr* parse_trait_name(Parser* p) {
+    Token tok = parser_expect_ident(p, "a trait name");
+    return expr_new(E_IDENT, tok, NULL, NULL);
+}
+
+// trait-member = [ "@prec" "(" INT "," INT ")" ] declaration-specifiers declarator ";"
+// A method prototype; with @prec, a dotted operator and its binding powers.
+
+// @prec(left_bp, right_bp): an E_ALL carrying the packed binding powers in aux,
+// which istack_trait_member moves into the declaration
+static inline Expr* parse_trait_prec(Parser* p) {
+    Expr* prec = expr_new(E_ALL, parser_peek(p), NULL, NULL);
+    parser_advance(p);
+    if (!token_ident(parser_peek(p), "prec"))
+        parser_fail(p, parser_peek(p), "unknown annotation; expected '@prec(left_bp, right_bp)'");
+    parser_advance(p);
+    parser_expect(p, "(");
+    int bp[2];
+    for (int i = 0; i < 2; i++) {
+        Token num = parser_peek(p);
+        char* end = NULL;
+        long value = num.kind == TK_PP_NUM ? strtol(num.start, &end, 0) : -1;
+        if (num.kind != TK_PP_NUM || end != num.start + num.length || value < 0 || value > 0x7fff)
+            parser_fail(p, num, "'@prec' takes two integer literals");
+        bp[i] = (int)value;
+        parser_advance(p);
+        if (i == 0) parser_expect(p, ",");
+    }
+    parser_expect(p, ")");
+    prec->aux = (1 << 30) | (bp[0] << 15) | bp[1];
+    return prec;
+}
+
+// The prototype: an E_DECL with name, type and generics
+static inline Expr* parse_trait_prototype(Parser* p) {
     Expr* specs = parse_decl_specifiers(p, NULL, 0);
     DeclInfo info = {0};
     Expr* type = parse_declarator(p, specs, &info, DM_NAMED | DM_GENERIC | DM_METHOD);
     Expr* fn = decl_function_type(type);
     if (!fn)
         parser_fail(p, info.name, "trait members must be method prototypes");
-    if (prec && info.name.kind != TK_DOTOP)
-        parser_fail(p, start, "'@prec' is only allowed on dotted-operator prototypes");
-    parser_check_receiver(p, fn, info.name);
+    check_receiver(p, fn, info.name);
     if (info.has_scope) parser_scope_pop(p, info.scope);
     if (token_punct(parser_peek(p), "{"))
         parser_fail(p, parser_peek(p), "trait methods are prototypes only; default bodies are not allowed");
-    parser_expect(p, ";");
 
     Expr* decl = expr_new(E_DECL, info.name, NULL, NULL);
     decl->name = info.name;
     decl->type = type;
     decl->generics = info.generics;
-    decl->aux = prec;
     return decl;
 }
 
-// trait-declaration = "trait" [ generic-parameters ] IDENT "{" { trait-member } "}" [ ";" ]
-static inline Expr* parse_trait(Parser* p, int pub) {
-    Token keyword = parser_peek(p);
-    parser_advance(p);
-    Expr* trait = expr_new(E_TRAIT, keyword, NULL, NULL);
-    trait->flags = pub;
+// context: the declaration; stack: [ @prec ]
+static inline void istack_trait_member(Expr* context, Expr* stack[256], size_t* idx) {
+    if (*idx == 1) context->aux = stack[0]->aux;
+}
 
-    size_t scope = parser_scope_push(p);
-    if (token_punct(parser_peek(p), "<"))
-        trait->generics = parse_generic_params(p);
-    trait->name = parser_expect_ident(p, "a trait name");
-    parser_declare(p, token_synth("Self", TK_IDENT, keyword), 1);
+static const ParseRule trait_member_rule[] = {
+    // @prec(...)
+    BIF("@"),
+        REC(parse_trait_prec),
+        POP, // put into return context
+    END,
 
-    parser_expect(p, "{");
+    REC(parse_trait_prototype),
+    POP, // the declaration is the member
+    EXPECT(";"),
+
+    ISTACK(istack_trait_member),
+    END
+};
+
+static inline Expr* parse_trait_member(Parser* p) {
+    Token start = parser_peek(p);
+    Expr* member = parse_rule(p, trait_member_rule);
+    if (member && member->aux && member->name.kind != TK_DOTOP)
+        parser_fail(p, start, "'@prec' is only allowed on dotted-operator prototypes");
+    return member;
+}
+
+// The members between the braces, collected in an E_LIST
+static inline Expr* parse_trait_members(Parser* p) {
+    Expr* members = expr_new(E_LIST, parser_peek(p), NULL, NULL);
     while (!token_punct(parser_peek(p), "}")) {
         if (parser_peek(p).kind == TK_EOF) set_parser_error(p, PERR_OPEN_CBRACK);
         if (token_kw(parser_peek(p), "pub"))
             parser_fail(p, parser_peek(p), "trait methods do not take 'pub'; visibility belongs to the trait");
-        if (parse_ct_control(p, trait, E_TRAIT)) continue;
-        expr_push(trait, parse_trait_member(p));
+        if (parse_ct_control(p, members, E_TRAIT)) continue;
+        expr_push(members, parse_trait_member(p));
     }
-    parser_advance(p);
-    if (token_punct(parser_peek(p), ";")) parser_advance(p);
+    return members;
+}
+
+// stack: [ generics ] name members
+// The generic parameters are an E_LIST and the name an E_IDENT, so the kind of
+// stack[0] tells whether `<...>` was there.
+static inline void istack_trait(Expr* context, Expr* stack[256], size_t* idx) {
+    (void)idx;
+    size_t i = 0;
+    if (stack[i]->kind == E_LIST) context->generics = stack[i++];
+    context->name = stack[i++]->token;
+    Expr* members = stack[i];
+    context->blockstmt            = members->blockstmt;
+    context->blockstmt_size       = members->blockstmt_size;
+    context->alloc_blockstmt_size = members->alloc_blockstmt_size;
+}
+
+static const ParseRule trait_rule[] = {
+    TOK("trait", E_TRAIT),
+    POP,
+
+    // <...>
+    BIF("<"),
+        REC(parse_generic_params),
+        POP, // put into return context
+    END,
+    REC(parse_trait_name),
+
+    // { ... }
+    EXPECT("{"),
+    REC(parse_trait_members),
+    EXPECT("}"),
+
+    ISTACK(istack_trait),
+    END
+};
+
+static inline Expr* parse_trait(Parser* p, int pub) {
+    // the generic parameters and `Self` are names of the trait only
+    size_t scope = parser_scope_push(p);
+    parser_declare(p, token_synth("Self", TK_IDENT, parser_peek(p)), 1);
+    Expr* trait = parse_rule(p, trait_rule);
+    if (trait) {
+        trait->flags = pub;
+        if (token_punct(parser_peek(p), ";")) parser_advance(p);
+    }
     parser_scope_pop(p, scope);
     return trait;
 }
 
+// END Trait
+
+// Impl
+//
 // impl-block = "impl" [ generic-parameters ] [ trait "for" ] type "{" { [ "pub" ] method } "}" [ ";" ]
-// method = [ "pub" ] declaration-specifiers declarator block
-static inline Expr* parse_method(Parser* p) {
-    int pub = 0;
-    if (token_kw(parser_peek(p), "pub")) {
-        pub = F_PUB;
+// method     = [ "pub" ] declaration-specifiers declarator block
+// E_IMPL: generics, left = trait (E_TY_NAME) or NULL, type = target, blockstmt = E_FUNCDEF
+
+// The prescan: nothing in an impl declares a name other files need to parse,
+// except which names are followed by `<`: methods that may be called with
+// explicit generic arguments, kept as E_IDENT in blockstmt
+static inline Expr* parse_impl_prescan(Parser* p) {
+    Expr* impl = expr_new(E_IMPL, parser_peek(p), NULL, NULL);
+    parser_advance(p);
+    while (!token_punct(parser_peek(p), "{")) {
+        if (parser_peek(p).kind == TK_EOF) parser_fail(p, parser_peek(p), "expected '{' after 'impl'");
         parser_advance(p);
     }
+    int depth = 0;
+    do {
+        Token tok = parser_peek(p);
+        if (tok.kind == TK_EOF) parser_fail(p, tok, "expected '}' before end of file");
+        if (token_punct(tok, "{")) depth++;
+        else if (token_punct(tok, "}")) depth--;
+        else if (tok.kind == TK_IDENT && depth == 1 && token_punct(parser_peek2(p), "<"))
+            expr_push(impl, expr_new(E_IDENT, tok, NULL, NULL));
+        parser_advance(p);
+    } while (depth > 0);
+    if (token_punct(parser_peek(p), ";")) parser_advance(p);
+    return impl;
+}
+
+// The definition after `pub`: specifiers, a function declarator with the
+// receiver first, and the body. One helper, since the specifiers' storage flags
+// and the declarator's DeclInfo go on into parse_function_definition.
+static inline Expr* parse_method_definition(Parser* p) {
     int flags = 0;
     Expr* specs = parse_decl_specifiers(p, &flags, 1);
     if (flags & (F_TYPEDEF | F_EXTERN))
@@ -2794,132 +3043,259 @@ static inline Expr* parse_method(Parser* p) {
     Expr* fn = decl_function_type(type);
     if (!fn || !token_punct(parser_peek(p), "{"))
         parser_fail(p, info.name, "an impl block contains only method definitions");
-    parser_check_receiver(p, fn, info.name);
-    return parse_function_definition(p, type, &info, flags | pub);
+    check_receiver(p, fn, info.name);
+    return parse_function_definition(p, type, &info, flags);
 }
 
-static inline Expr* parse_impl(Parser* p) {
-    Token keyword = parser_peek(p);
-    parser_advance(p);
-    Expr* impl = expr_new(E_IMPL, keyword, NULL, NULL);
+// context: the E_FUNCDEF; stack: [ pub ]
+static inline void istack_method(Expr* context, Expr* stack[256], size_t* idx) {
+    (void)stack;
+    if (*idx == 1) context->flags |= F_PUB;
+}
 
-    if (p->prescan) {
-        // nothing in an impl declares a name other files need to parse
-        while (!token_punct(parser_peek(p), "{")) {
-            if (parser_peek(p).kind == TK_EOF) parser_fail(p, parser_peek(p), "expected '{' after 'impl'");
-            parser_advance(p);
-        }
-        // ... except which names are followed by `<`: methods that may be
-        // called with explicit generic arguments
-        int depth = 0;
-        do {
-            Token tok = parser_peek(p);
-            if (tok.kind == TK_EOF) parser_fail(p, tok, "expected '}' before end of file");
-            if (token_punct(tok, "{")) depth++;
-            else if (token_punct(tok, "}")) depth--;
-            else if (tok.kind == TK_IDENT && depth == 1 && token_punct(parser_peek2(p), "<"))
-                expr_push(impl, expr_new(E_IDENT, tok, NULL, NULL));
-            parser_advance(p);
-        } while (depth > 0);
-        if (token_punct(parser_peek(p), ";")) parser_advance(p);
-        return impl;
-    }
+static const ParseRule method_rule[] = {
+    // pub
+    BIF("pub"),
+        TOK("pub", E_ALL),
+        POP, // put into return context
+    END,
 
-    size_t scope = parser_scope_push(p);
-    if (token_punct(parser_peek(p), "<"))
-        impl->generics = parse_generic_params(p);
-    parser_declare(p, token_synth("Self", TK_IDENT, keyword), 1);
+    REC(parse_method_definition),
+    POP, // the definition is the method
+    ISTACK(istack_method),
+    END
+};
 
-    Expr* first = parse_type_name(p);
-    if (token_kw(parser_peek(p), "for")) {
-        if (first->kind != E_TY_NAME || (first->flags & F_QUALS))
-            parser_fail(p, first->token, "expected a trait name before 'for'");
-        parser_advance(p);
-        impl->left = first;
-        impl->type = parse_type_name(p);
-    } else {
-        impl->type = first;
-    }
+static inline Expr* parse_method(Parser* p) {
+    return parse_rule(p, method_rule);
+}
 
-    parser_expect(p, "{");
+// The methods between the braces, collected in an E_LIST, which also takes
+// the comments before the closing brace
+static inline Expr* parse_impl_methods(Parser* p) {
+    Expr* methods = expr_new(E_LIST, parser_peek(p), NULL, NULL);
     Expr* prev = NULL;
     while (!token_punct(parser_peek(p), "}")) {
         if (parser_peek(p).kind == TK_EOF) set_parser_error(p, PERR_OPEN_CBRACK);
         Token start = parser_peek(p);
-        if (parse_ct_control(p, impl, E_IMPL)) continue;
+        if (parse_ct_control(p, methods, E_IMPL)) continue;
         Expr* method = parse_method(p);
         parser_take_trivia(p, prev, start, method, NULL);
-        expr_push(impl, method);
+        expr_push(methods, method);
         prev = method;
     }
-    parser_take_trivia(p, prev, parser_peek(p), NULL, impl);
-    parser_advance(p);
-    if (token_punct(parser_peek(p), ";")) parser_advance(p);
+    parser_take_trivia(p, prev, parser_peek(p), NULL, methods);
+    return methods;
+}
+
+// stack: [ generics ] type [ type ] methods
+// The generic parameters are an E_LIST and types E_TY_*, so the kind of
+// stack[0] tells whether `<...>` was there; two types are `trait for target`.
+static inline void istack_impl(Expr* context, Expr* stack[256], size_t* idx) {
+    size_t i = 0;
+    if (stack[i]->kind == E_LIST) context->generics = stack[i++];
+    Expr* first = stack[i++];
+    if (*idx - i == 2) {
+        context->left = first;
+        context->type = stack[i++];
+    } else {
+        context->type = first;
+    }
+    Expr* methods = stack[i];
+    context->blockstmt            = methods->blockstmt;
+    context->blockstmt_size       = methods->blockstmt_size;
+    context->alloc_blockstmt_size = methods->alloc_blockstmt_size;
+    context->inner                = methods->inner;
+    context->inner_len            = methods->inner_len;
+}
+
+static const ParseRule impl_rule[] = {
+    // impl<...> ... for ...
+    TOK("impl", E_IMPL),
+    POP,
+
+    // <...>
+    BIF("<"),
+        REC(parse_generic_params),
+        POP, // put into return context
+    END,
+
+    REC(parse_type_name),
+
+    // for ...
+    BIF("for"),
+        EXPECT("for"),
+        REC(parse_type_name),
+        POP, // put into return context
+    END,
+
+    // { ... }
+    EXPECT("{"),
+    REC(parse_impl_methods),
+    EXPECT("}"),
+
+    ISTACK(istack_impl),
+    END
+};
+
+static inline Expr* parse_impl(Parser* p) {
+    if (p->prescan) return parse_impl_prescan(p);
+    // the generic parameters and `Self` are names of the impl only
+    size_t scope = parser_scope_push(p);
+    parser_declare(p, token_synth("Self", TK_IDENT, parser_peek(p)), 1);
+    Expr* impl = parse_rule(p, impl_rule);
+    if (impl) {
+        Expr* trait = impl->left;
+        if (trait && (trait->kind != E_TY_NAME || (trait->flags & F_QUALS)))
+            parser_fail(p, trait->token, "expected a trait name before 'for'");
+        if (token_punct(parser_peek(p), ";")) parser_advance(p);
+    }
     parser_scope_pop(p, scope);
     return impl;
 }
 
+// END Impl
+
+// Generic typedef
+//
 // generic-typedef = "typedef" generic-parameters specifiers declarator(Name<T, ...>) ";"
-static inline Expr* parse_generic_typedef(Parser* p, int pub) {
-    Token keyword = parser_peek(p);
-    parser_advance(p);
+// E_GTYPEDEF: name, generics, type, left = specifiers
 
-    size_t scope = parser_scope_push(p);
-    Expr* def = expr_new(E_GTYPEDEF, keyword, NULL, NULL);
-    def->flags = pub;
-    def->generics = parse_generic_params(p);
-
+// The specifiers and the declarator: an E_DECL with left = specifiers, type,
+// name, and generics = the list repeated after the name
+static inline Expr* parse_generic_typedef_declarator(Parser* p) {
     Expr* specs = parse_decl_specifiers(p, NULL, 0);
     if (specs->kind == E_TY_STRUCT && (specs->flags & F_HAS_BODY) && specs->name.length)
         parser_fail(p, specs->name, "a struct defined by a generic typedef must be anonymous; remove the tag '%.*s'",
                     (int)specs->name.length, specs->name.start);
 
     DeclInfo info = {0};
-    def->left = specs;
-    def->type = parse_declarator(p, specs, &info, DM_NAMED | DM_GTYPEDEF);
-    def->name = info.name;
+    Expr* type = parse_declarator(p, specs, &info, DM_NAMED | DM_GTYPEDEF);
+    Expr* decl = expr_new(E_DECL, info.name, NULL, NULL);
+    decl->left = specs;
+    decl->type = type;
+    decl->name = info.name;
+    decl->generics = info.generics;
+    return decl;
+}
 
-    // the list after the name is mandatory and repeats the parameters exactly
+// stack: generics declarator
+// The declarator stays in right until parse_generic_typedef has checked the
+// list repeated after the name, which needs both parts.
+static inline void istack_generic_typedef(Expr* context, Expr* stack[256], size_t* idx) {
+    (void)idx;
+    Expr* decl = stack[1];
+    context->generics = stack[0];
+    context->left     = decl->left;
+    context->type     = decl->type;
+    context->name     = decl->name;
+    context->right    = decl;
+}
+
+static const ParseRule generic_typedef_rule[] = {
+    TOK("typedef", E_GTYPEDEF),
+    POP,
+
+    REC(parse_generic_params),
+    REC(parse_generic_typedef_declarator),
+    EXPECT(";"),
+
+    ISTACK(istack_generic_typedef),
+    END
+};
+
+// The list after the name is mandatory and repeats the parameters exactly
+static inline void check_repeated_params(Parser* p, Expr* def) {
     Expr* params = def->generics;
-    Expr* names = info.generics;
+    Expr* names = def->right->generics;
+    Token name = def->name;
     if (!names)
-        parser_fail(p, info.name, "generic typedef '%.*s' must repeat its parameters after the name, as in '%.*s<%.*s%s>'",
-                    (int)info.name.length, info.name.start, (int)info.name.length, info.name.start,
+        parser_fail(p, name, "generic typedef '%.*s' must repeat its parameters after the name, as in '%.*s<%.*s%s>'",
+                    (int)name.length, name.start, (int)name.length, name.start,
                     (int)params->blockstmt[0]->name.length, params->blockstmt[0]->name.start,
                     params->blockstmt_size > 1 ? ", ..." : "");
     if (names->blockstmt_size != params->blockstmt_size)
         parser_fail(p, names->token, "generic typedef '%.*s' declares %zu parameter(s) but repeats %zu",
-                    (int)info.name.length, info.name.start, params->blockstmt_size, names->blockstmt_size);
+                    (int)name.length, name.start, params->blockstmt_size, names->blockstmt_size);
     for (size_t i = 0; i < names->blockstmt_size; i++)
         if (!token_same(names->blockstmt[i]->token, params->blockstmt[i]->name))
             parser_fail(p, names->blockstmt[i]->token, "expected '%.*s' here: the list after the name repeats the generic parameters in order",
                         (int)params->blockstmt[i]->name.length, params->blockstmt[i]->name.start);
+}
 
-    parser_expect(p, ";");
+static inline Expr* parse_generic_typedef(Parser* p, int pub) {
+    // the generic parameters are names of the typedef only; its own name is
+    // declared after them, outside
+    size_t scope = parser_scope_push(p);
+    Expr* def = parse_rule(p, generic_typedef_rule);
+    if (def) {
+        def->flags = pub;
+        check_repeated_params(p, def);
+        def->right = NULL;
+    }
     parser_scope_pop(p, scope);
-    parser_declare(p, def->name, 1);
+    if (def) parser_declare(p, def->name, 1);
     return def;
 }
 
+// END Generic typedef
+
+// Import
+//
 // import-declaration = "import" namespace-path [ "as" IDENT ] ";"
-static inline Expr* parse_import(Parser* p) {
-    Expr* import = expr_new(E_IMPORT, parser_peek(p), NULL, NULL);
-    parser_advance(p);
+// namespace-path     = IDENT { "::" IDENT }
+// E_IMPORT: blockstmt = E_IDENT path, name = local binding
+
+// The path, `a::b::c`: an E_LIST of the E_IDENT segments
+static inline Expr* parse_import_path(Parser* p) {
+    Expr* path = expr_new(E_LIST, parser_peek(p), NULL, NULL);
     for (;;) {
-        Expr* segment = parse_ident_node(p);
-        expr_push(import, segment);
-        import->name = segment->token;
+        expr_push(path, parse_ident_node(p));
         if (!token_punct(parser_peek(p), "::")) break;
         parser_advance(p);
     }
-    // `as` is only special right here
-    if (token_ident(parser_peek(p), "as")) {
-        parser_advance(p);
-        import->name = parser_expect_ident(p, "an alias after 'as'");
-    }
-    parser_expect(p, ";");
-    return import;
+    return path;
 }
+
+// The name after `as`
+static inline Expr* parse_import_alias(Parser* p) {
+    Token tok = parser_expect_ident(p, "an alias after 'as'");
+    return expr_new(E_IDENT, tok, NULL, NULL);
+}
+
+// stack: path [ alias ]
+// The local binding is the alias, or else the last segment of the path.
+static inline void istack_import(Expr* context, Expr* stack[256], size_t* idx) {
+    Expr* path = stack[0];
+    context->blockstmt            = path->blockstmt;
+    context->blockstmt_size       = path->blockstmt_size;
+    context->alloc_blockstmt_size = path->alloc_blockstmt_size;
+    context->name = *idx == 2 ? stack[1]->token : path->blockstmt[path->blockstmt_size - 1]->token;
+}
+
+static const ParseRule import_rule[] = {
+    TOK("import", E_IMPORT),
+    POP,
+
+    REC(parse_import_path),
+
+    // as ... (`as` is only special right here)
+    BIF("as"),
+        EXPECT("as"),
+        REC(parse_import_alias),
+        POP, // put into return context
+    END,
+    EXPECT(";"),
+
+    ISTACK(istack_import),
+    END
+};
+
+static inline Expr* parse_import(Parser* p) {
+    return parse_rule(p, import_rule);
+}
+
+// END Import
 
 static inline Expr* parse_external_declaration(Parser* p) {
     Token tok = parser_peek(p);
@@ -2991,7 +3367,7 @@ static inline Expr* parse_header_declaration(Parser* p) {
     p->spec_depth = 0;
     p->strict_types = 0;
     p->names_len = names;
-    parser_skip_declaration(p);
+    skip_declaration(p);
     return NULL;
 }
 
@@ -3035,7 +3411,7 @@ static inline Expr* parse_recovering_declaration(Parser* p, int* stop) {
             if (token_punct(parser_peek(p), "{")) parser_skip_block(p);
             if (token_punct(parser_peek(p), ";")) parser_advance(p);
         } else {
-            parser_skip_declaration(p);
+            skip_declaration(p);
         }
     }
     p->silent = p->prescan;
