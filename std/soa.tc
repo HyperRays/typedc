@@ -1,0 +1,132 @@
+// A structure of arrays: one array per field of a struct, all of the same
+// length, instead of one array of structs.
+//
+//   import std;
+//
+//   typedef struct { Vec3 position; Vec3 velocity; float mass; } Body;
+//
+//   std::Soa<Body> bodies = {0};
+//   (&bodies).push(body);
+//   for (size_t i = 0; i < bodies.count; i++)
+//       bodies.position[i] = bodies.position[i] .add. bodies.velocity[i];
+//   Body b = bodies.get(0);
+//   (&bodies).free();
+//
+// The layout is generated from the fields of T: for every field `name` of
+// type F, Soa<T> has a member `F* name` pointing at the column of that field,
+// so element i of the field is `soa.name[i]`. A loop that only looks at a few
+// fields only goes through the memory of those.
+//
+// `count` and `capacity` are members of Soa<T> as well, so T cannot have
+// fields with these names. A field that is an array, like `float m[16]`,
+// gets a column of arrays: `soa.m[i][j]`.
+//
+// What changes a Soa can move its columns, so it is a method of the address
+// of the Soa, and pointers into the columns are not kept across it.
+//
+// get, set and swap_remove check that the index is one of the elements, with
+// assert: a debug build stops there, one built with -DNDEBUG does not check.
+// Indexing a column directly (soa.name[i]) is not checked.
+
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+import builtin;
+
+pub typedef<T> struct {
+    size_t count;       // how many elements there are
+    size_t capacity;    // for how many there is memory in every column
+    for (@int i = 0; i < @count<T>(); i++)
+        @type(@fields<T>()[i].type)* @ident(@fields<T>()[i].name);
+} Soa<T>;
+
+// What only looks at a Soa is a method of the Soa: soa.get(3)
+impl<T> Soa<T> {
+    // Puts element `index` together from the columns.
+    pub T get(Self self, size_t index) {
+        assert(index < self.count && "std::Soa: get() of an index past the last element");
+        T out;
+        for (@int i = 0; i < @count<T>(); i++) {
+            builtin::@Field f = @fields<T>()[i];
+            // an array cannot be assigned, a bit-field has no address
+            if (f.kind == builtin::FieldKind::FIELD_ARRAY)
+                memcpy(&out.[f], &self.@ident(f.name)[index], f.size);
+            else
+                out.[f] = self.@ident(f.name)[index];
+        }
+        return out;
+    }
+}
+
+// What changes a Soa is a method of its address: (&soa).push(value)
+impl<T> Soa<T>* {
+    // Makes every column hold at least `capacity` elements.
+    pub void reserve(Self self, size_t capacity) {
+        if (capacity <= self->capacity) return;
+        for (@int i = 0; i < @count<T>(); i++) {
+            builtin::@Field f = @fields<T>()[i];
+            void* column = realloc(self->@ident(f.name), capacity * f.size);
+            if (!column) {
+                fputs("std: out of memory\n", stderr);
+                exit(1);
+            }
+            self->@ident(f.name) = column;
+        }
+        self->capacity = capacity;
+    }
+
+    // Overwrites element `index` with the fields of `value`.
+    pub void set(Self self, size_t index, T value) {
+        assert(index < self->count && "std::Soa: set() of an index past the last element");
+        for (@int i = 0; i < @count<T>(); i++) {
+            builtin::@Field f = @fields<T>()[i];
+            if (f.kind == builtin::FieldKind::FIELD_ARRAY)
+                memcpy(&self->@ident(f.name)[index], &value.[f], f.size);
+            else
+                self->@ident(f.name)[index] = value.[f];
+        }
+    }
+
+    // Adds an element at the end.
+    pub void push(Self self, T value) {
+        if (self->count == self->capacity)
+            self.reserve(self->capacity ? self->capacity * 2 : 8);
+        self->count++;
+        self.set(self->count - 1, value);
+    }
+
+    // Removes element `index` by moving the last element into its place, so
+    // the order of the elements changes but nothing else moves.
+    pub void swap_remove(Self self, size_t index) {
+        assert(index < self->count && "std::Soa: swap_remove() of an index past the last element");
+        size_t last = self->count - 1;
+        if (index != last) {
+            for (@int i = 0; i < @count<T>(); i++) {
+                builtin::@Field f = @fields<T>()[i];
+                if (f.kind == builtin::FieldKind::FIELD_ARRAY)
+                    memcpy(&self->@ident(f.name)[index], &self->@ident(f.name)[last], f.size);
+                else
+                    self->@ident(f.name)[index] = self->@ident(f.name)[last];
+            }
+        }
+        self->count = last;
+    }
+
+    // Removes every element and keeps the memory.
+    pub void clear(Self self) {
+        self->count = 0;
+    }
+
+    // Frees the columns. The Soa is empty afterwards and can be used again.
+    pub void free(Self self) {
+        for (@int i = 0; i < @count<T>(); i++) {
+            builtin::@Field f = @fields<T>()[i];
+            free(self->@ident(f.name));
+            self->@ident(f.name) = 0;
+        }
+        self->count = 0;
+        self->capacity = 0;
+    }
+}
