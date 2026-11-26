@@ -30,7 +30,7 @@ trap 'rm -rf "$tmp"' EXIT
 command -v perl > /dev/null || { echo "bench.sh needs perl for timing" >&2; exit 1; }
 
 mkdir -p build
-${CC:-cc} -O2 src/main.c -o "$bin" || exit 1
+${CC:-cc} -O2 src/main.c src/os/posix/os_posix.c -o "$bin" || exit 1
 
 # bench <command...>: average milliseconds of one run, over $runs runs.
 # A first run, with its errors shown, makes sure the command works.

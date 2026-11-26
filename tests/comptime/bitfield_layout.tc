@@ -1,0 +1,59 @@
+// The layout typedc works out at compile time is the C compiler's, also for
+// bit-fields of types of different sizes, which Windows lays out by other
+// rules than Linux and macOS: each struct's size, and where the member after
+// its bit-fields is, as typedc finds them and as C finds them.
+#include <stddef.h>
+#include <stdio.h>
+
+// where `member` is in `value`, as the C compiler lays it out
+#{
+#define OFFSET(value, member) ((size_t)((char*)&(value).member - (char*)&(value)))
+}#
+import builtin;
+
+typedef struct { int a : 3; char b : 2; int c : 5; char after; } Mixed;
+typedef struct { char a : 3; short b : 9; long long c : 4; char after; } Widening;
+typedef struct { unsigned a : 7; unsigned : 0; unsigned b : 3; char after; } Zero;
+typedef struct { char before; int a : 3; char after; } Around;
+typedef struct { short a : 4; int b : 4; short c : 4; double after; } Alternating;
+typedef struct { unsigned a : 20; unsigned b : 20; char after; } Overflowing;
+typedef struct { char a : 3; char b : 3; char c : 3; short after; } Chars;
+typedef union { char a : 3; int b : 5; } Both;
+
+void check(const char* name, long size, size_t c_size, long after, size_t c_after) {
+    if (size == (long)c_size && after == (long)c_after)
+        printf("%s ok\n", name);
+    else
+        printf("%s differs: size %ld (typedc) %zu (C), after at %ld (typedc) %zu (C)\n",
+               name, size, c_size, after, c_after);
+}
+
+int main(void) {
+    @long mixed = sizeof(Mixed), mixed_after = @fields<Mixed>()[3].offset;
+    @long widening = sizeof(Widening), widening_after = @fields<Widening>()[3].offset;
+    @long zero = sizeof(Zero), zero_after = @fields<Zero>()[2].offset;      // the unnamed one is not a field
+    @long around = sizeof(Around), around_after = @fields<Around>()[2].offset;
+    @long alternating = sizeof(Alternating), alternating_after = @fields<Alternating>()[3].offset;
+    @long overflowing = sizeof(Overflowing), overflowing_after = @fields<Overflowing>()[2].offset;
+    @long chars = sizeof(Chars), chars_after = @fields<Chars>()[3].offset;
+    @long both = sizeof(Both);
+    Mixed m; Widening w; Zero z; Around a; Alternating al; Overflowing o; Chars c;
+    check("Mixed", mixed, sizeof(Mixed), mixed_after, OFFSET(m, after));
+    check("Widening", widening, sizeof(Widening), widening_after, OFFSET(w, after));
+    check("Zero", zero, sizeof(Zero), zero_after, OFFSET(z, after));
+    check("Around", around, sizeof(Around), around_after, OFFSET(a, after));
+    check("Alternating", alternating, sizeof(Alternating), alternating_after, OFFSET(al, after));
+    check("Overflowing", overflowing, sizeof(Overflowing), overflowing_after, OFFSET(o, after));
+    check("Chars", chars, sizeof(Chars), chars_after, OFFSET(c, after));
+    check("Both", both, sizeof(Both), 0, 0);
+    return 0;
+}
+
+//> Mixed ok
+//> Widening ok
+//> Zero ok
+//> Around ok
+//> Alternating ok
+//> Overflowing ok
+//> Chars ok
+//> Both ok

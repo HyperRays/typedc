@@ -1,0 +1,31 @@
+// The enumerators of an enum from a C header have their values at compile
+// time, like those of an enum written in Typed C.
+#include <stdio.h>
+#include "values.h"
+import builtin;
+
+const char* mode_name(Mode m) {
+    const builtin::@Enumerator all[] = @enumerators<Mode>();
+    for (@int i = 0; i < sizeof all / sizeof all[0]; i++)
+        if (m == all[i].value) return all[i].name;
+    return "?";
+}
+
+int main(void) {
+    const builtin::@Enumerator all[] = @enumerators<Mode>();
+    for (@int i = 0; i < sizeof all / sizeof all[0]; i++)
+        printf("%s = %lld\n", all[i].name, all[i].value);
+    @int eleventh = MODE_ELEVENTH;
+    printf("%d %s %s\n", eleventh * 2, mode_name(MODE_FLAG), mode_name(MODE_NEGATIVE));
+    return 0;
+}
+
+//> MODE_FIRST = 0
+//> MODE_SECOND = 1
+//> MODE_TENTH = 10
+//> MODE_ELEVENTH = 11
+//> MODE_NEGATIVE = -1000011001
+//> MODE_FLAG = 16
+//> MODE_HEX = 2147483647
+//> MODE_ALIAS = 10
+//> 22 MODE_FLAG MODE_NEGATIVE

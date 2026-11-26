@@ -1,7 +1,5 @@
 #pragma once
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "os/os.h"
 #include "types.h"
 
 // Loading: source files, directory namespaces, C header discovery, and the
@@ -46,34 +44,29 @@ static inline char* read_file(const char* path) {
     return b.data;
 }
 
+// The file name of a path: what follows its last separator
+static inline const char* path_base(const char* path) {
+    const char* name = path + os_root_length(path);
+    for (const char* p = name; *p; p++)
+        if (os_is_separator(*p)) name = p + 1;
+    return name;
+}
+
+// The directory of a path: "." if it has none, its root ("/", "C:\") if that is all
 static inline const char* path_dir(const char* path) {
-    const char* slash = strrchr(path, '/');
-    if (!slash) return ".";
-    if (slash == path) return "/";
-    return xstrn(path, (size_t)(slash - path));
+    size_t root = os_root_length(path);
+    const char* name = path_base(path);
+    if (name == path) return ".";
+    const char* end = name - 1;     // the separator before the name, or the end of the root
+    while (end > path + root && os_is_separator(end[-1])) end--;
+    if (end <= path + root) return xstrn(path, root ? root : 1);
+    return xstrn(path, (size_t)(end - path));
 }
 
 static inline const char* path_stem(const char* path) {
-    const char* slash = strrchr(path, '/');
-    const char* name = slash ? slash + 1 : path;
+    const char* name = path_base(path);
     const char* dot = strrchr(name, '.');
     return xstrn(name, dot && dot != name ? (size_t)(dot - name) : strlen(name));
-}
-
-static inline int is_directory(const char* path) {
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-static inline const char* shell_quote(const char* s) {
-    Buf b = {0};
-    buf_putc(&b, '\'');
-    for (; *s; s++) {
-        if (*s == '\'') buf_puts(&b, "'\\''");
-        else buf_putc(&b, *s);
-    }
-    buf_putc(&b, '\'');
-    return buf_str(&b);
 }
 
 static inline const char* source_line(SrcFile* f, size_t row) {
@@ -232,7 +225,7 @@ static inline Module* module_for_import(SrcFile* from, Expr* import) {
     if (m) return m;
     if (strcmp(buf_str(&name), "builtin") == 0) return ct_builtin_module();
 
-    if (!is_directory(buf_str(&dir)))
+    if (!os_is_dir(buf_str(&dir)))
         fatal(from->path, import->token, "cannot find namespace '%s': '%s' is not a directory",
               buf_str(&name), buf_str(&dir));
     m = module_new(buf_str(&name));
@@ -242,14 +235,12 @@ static inline Module* module_for_import(SrcFile* from, Expr* import) {
     map_put(&g_module_by_name, m->name, m);
 
     List paths = {0};
-    DIR* d = opendir(m->dir);
-    if (d) {
-        for (struct dirent* e; (e = readdir(d));) {
-            size_t n = strlen(e->d_name), x = strlen(SOURCE_EXTENSION);
-            if (n > x && strcmp(e->d_name + n - x, SOURCE_EXTENSION) == 0 && e->d_name[0] != '.')
-                list_push(&paths, xstrf("%s/%s", m->dir, e->d_name));
-        }
-        closedir(d);
+    size_t count = 0;
+    char** names = os_list_dir(m->dir, &count);
+    for (size_t i = 0; names && i < count; i++) {
+        size_t n = strlen(names[i]), x = strlen(SOURCE_EXTENSION);
+        if (n > x && strcmp(names[i] + n - x, SOURCE_EXTENSION) == 0 && names[i][0] != '.')
+            list_push(&paths, xstrf("%s/%s", m->dir, names[i]));
     }
     if (!paths.len)
         fatal(from->path, import->token, "namespace '%s' has no %s files in '%s'",
@@ -749,43 +740,37 @@ static inline void file_parse(SrcFile* f) {
 // C preprocessing and header discovery
 // ---------------------------------------------------------------------------
 
-static inline char* run_capture(const char* command) {
-    FILE* pipe = popen(command, "r");
-    if (!pipe) return NULL;
-    Buf b = {0};
-    char chunk[65536];
-    size_t n;
-    while ((n = fread(chunk, 1, sizeof chunk, pipe)) > 0)
-        buf_putn(&b, chunk, n);
-    if (pclose(pipe) != 0) return NULL;
-    buf_reserve(&b, 1);
-    b.data[b.len] = '\0';
-    return b.data;
+#ifdef TYPEDC_BUNDLED
+static char* bundled_preprocess(SrcFile* f, const char* source, const char* option, int quiet);
+#endif
+
+// An argument for the C compiler's command line, quoted for the shell
+static const char* shell_arg(SrcFile* f, const char* arg) {
+    const char* quoted = os_quote(arg);
+    if (!quoted)
+        fatal(f->path, (Token){0}, "cannot pass '%s' to the C compiler: the shell would expand its '%%'", arg);
+    return quoted;
 }
 
 // Runs the C preprocessor on `source`. Returns NULL if that fails; `quiet`
 // keeps what it reports from the user's terminal.
 static char* preprocess_c_try(SrcFile* f, const char* source, const char* option, int quiet) {
-    const char* tmpdir = getenv("TMPDIR");
-    char* tmp = xstrf("%s/typedc-XXXXXX.c", tmpdir && *tmpdir ? tmpdir : "/tmp");
-    int fd = mkstemps(tmp, 2);
-    if (fd < 0) return NULL;
-    size_t len = strlen(source);
-    if (write(fd, source, len) != (ssize_t)len) {
-        close(fd);
-        unlink(tmp);
-        return NULL;
-    }
-    close(fd);
-
+#ifdef TYPEDC_BUNDLED
+    // typedcc: the bundled TinyCC (bundled.h)
+    return bundled_preprocess(f, source, option, quiet);
+#endif
+    // the compiler command (--cc, $CC) is the user's text, as it is; the
+    // arguments typedc adds are quoted for the shell
     Buf cmd = {0};
     buf_printf(&cmd, "%s -E -x c", g_opt.cc);
     for (size_t i = 0; i < g_opt.cpp_args.len; i++)
-        buf_printf(&cmd, " %s", shell_quote((const char*)g_opt.cpp_args.items[i]));
-    buf_printf(&cmd, " -I%s %s %s", shell_quote(path_dir(f->path)), option, shell_quote(tmp));
-    if (quiet) buf_puts(&cmd, " 2>/dev/null");
-    char* result = run_capture(buf_str(&cmd));
-    unlink(tmp);
+        buf_printf(&cmd, " %s", shell_arg(f, (const char*)g_opt.cpp_args.items[i]));
+    buf_printf(&cmd, " %s %s", shell_arg(f, xstrf("-I%s", path_dir(f->path))), option);
+    char* tmp = os_temp_file("typedc-", ".c", source);
+    if (!tmp) return NULL;
+    buf_printf(&cmd, " %s", shell_arg(f, tmp));
+    char* result = os_shell(buf_str(&cmd), quiet);
+    remove(tmp);
     return result;
 }
 
@@ -920,9 +905,8 @@ static const char* constant_batched(SrcFile* f, Token source) {
 static inline void macro_try_type(SrcFile* f, Entity* e, Parser* p) {
     const char* body = e->macro_body;
     if (!body || !(isalpha((unsigned char)body[0]) || body[0] == '_')) return;
-    *p = parser_new(body);
+    *p = parser_new_header(body);
     p->filename = "<macro>";
-    p->header_mode = 1;
     p->strict_types = 1;
     p->env = f;
     p->lookup_type = env_lookup_type;
@@ -932,7 +916,7 @@ static inline void macro_try_type(SrcFile* f, Entity* e, Parser* p) {
     Expr* volatile type = NULL;
     p->spec_jmp[p->spec_depth++] = &attempt;
     if (setjmp(attempt) == 0) {
-        if (parser_at_type(p)) {
+        if (at_type(p)) {
             Expr* parsed = parse_type_name(p);
             if (p->token.kind == TK_EOF) type = parsed;
         }
@@ -992,9 +976,8 @@ static inline Module* cunit_for_file(SrcFile* f) {
     SrcFile* hf = file_new(unit, "<C headers>");
     hf->source = declarations;
 
-    Parser p = parser_new(declarations);
+    Parser p = parser_new_header(declarations);
     p.filename = hf->path;
-    p.header_mode = 1;
     p.env = hf;
     p.lookup_type = env_lookup_type;
     hf->ast = parse_translation_unit(&p);

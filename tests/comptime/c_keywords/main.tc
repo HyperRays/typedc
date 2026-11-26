@@ -1,0 +1,12 @@
+// Declarations from a C header that use pub, import, trait or impl as names
+// are visible: in C those are not keywords.
+#include <stdio.h>
+#include "names.h"
+
+int main(void) {
+    Keywords k = KEYWORDS_INIT;
+    printf("%d %d %zu\n", keywords_sum(k), twice(21), sizeof(Keywords));
+    return 0;
+}
+
+//> 10 42 16

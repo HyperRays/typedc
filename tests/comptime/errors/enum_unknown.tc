@@ -1,0 +1,4 @@
+// expect: '@enumerators' needs the value of 'SIZE_OF_INT' in 'Sizes', which is not known at compile time
+#include "enum_unknown.h"
+import builtin;
+int main(void) { const builtin::@Enumerator all[] = @enumerators<Sizes>(); return (int)all[0].value; }
