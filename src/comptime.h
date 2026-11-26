@@ -32,7 +32,7 @@ static int ct_spliced(Token name) {
 // followed by an identifier, the two become one token, an identifier whose
 // text starts with '@'. An `@ident(...)` becomes one such token as a whole,
 // and its arguments are kept for when the name is needed.
-static inline void parser_ct_name(Parser* p) {
+static inline void ct_name(Parser* p) {
     Token at = p->token;
     Token name = parser_peek2(p);
     if (!token_punct(at, "@") || name.kind != TK_IDENT || name.start != at.start + 1) return;
@@ -61,14 +61,14 @@ static inline void parser_ct_name(Parser* p) {
 // Returns whether the '@' the parser is at starts a type: `@int` does, and so
 // do `@Name` when `Name` is a type, `@Type`, and `@type(...)`. Anything else,
 // such as `@name(...)`, is a call.
-static inline int parser_at_ct_type(Parser* p) {
+static inline int at_ct_type(Parser* p) {
     Token name = parser_peek2(p);
     if (name.kind == TK_KEYWORD) return token_is_type_keyword(name);
     if (name.kind != TK_IDENT || name.start != p->token.start + 1) return 0;
     Token whole = name;         // a type that was declared with the '@' in its name
     whole.start--;
     whole.length++;
-    return token_ident(name, "Type") || token_ident(name, "type") || parser_is_type_path(p, &name, 1) || parser_is_type_path(p, &whole, 1);
+    return token_ident(name, "Type") || token_ident(name, "type") || is_type_path(p, &name, 1) || is_type_path(p, &whole, 1);
 }
 
 // Takes the '@' of `namespace::@Name`, which asks for the compile-time
@@ -86,9 +86,9 @@ static inline Expr* parse_ct_spec(Parser* p, int* quals) {
     Token whole = parser_peek2(p);
     whole.start--;
     whole.length++;
-    if (whole.kind == TK_IDENT && whole.start == p->token.start && parser_is_type_path(p, &whole, 1)) {
+    if (whole.kind == TK_IDENT && whole.start == p->token.start && is_type_path(p, &whole, 1)) {
         // a compile-time type: its variables are compile-time variables
-        parser_ct_name(p);
+        ct_name(p);
         *quals |= F_COMPTIME;
         return parse_typedef_name(p);
     }
@@ -104,7 +104,7 @@ static inline Expr* parse_ct_spec(Parser* p, int* quals) {
         return spec;
     }
     *quals |= F_COMPTIME;
-    if (!token_ident(name, "Type") || parser_is_type_path(p, &name, 1)) return NULL;
+    if (!token_ident(name, "Type") || is_type_path(p, &name, 1)) return NULL;
     parser_advance(p);
     return spec;
 }
@@ -126,7 +126,7 @@ static inline Expr* parse_ct_block_item(Parser* p) {
 // returns whether there was one.
 static inline int parse_ct_member(Parser* p, Expr* member) {
     if (!token_punct(parser_peek(p), "[")) {
-        parser_ct_name(p);      // the name can be made by @ident
+        ct_name(p);      // the name can be made by @ident
         return 0;
     }
     parser_advance(p);
@@ -140,7 +140,7 @@ static inline int parse_ct_member(Parser* p, Expr* member) {
 // Returns whether a declaration of compile-time variables stands where a
 // member is expected: something with an initializer, or, where the members
 // are methods, something that is not one.
-static inline int parser_at_ct_declaration(Parser* p, int in) {
+static inline int at_ct_declaration(Parser* p, int in) {
     Lexer lexer = p->lexer;
     int depth = 0;
     for (Token tok = p->token;; tok = lexer_next(&lexer)) {
@@ -180,7 +180,7 @@ static inline int parse_ct_control(Parser* p, Expr* owner, int in) {
     Token tok = parser_peek(p);
     int kind = token_kw(tok, "if") ? E_IF : token_kw(tok, "for") ? E_FOR : token_kw(tok, "while") ? E_WHILE : 0;
     if (!kind) {
-        if (p->prescan || !parser_at_ct_declaration(p, in)) return 0;
+        if (p->prescan || !at_ct_declaration(p, in)) return 0;
         expr_push(owner, parse_declaration(p, 1, 0));
         return 1;
     }
@@ -228,13 +228,13 @@ static inline Expr* parse_ct_external(Parser* p) {
         parser_advance(p);
         params = parse_generic_params(p);
     } else if (token_punct(tok, "@")) {
-        if (parser_at_ct_type(p)) return NULL;
+        if (at_ct_type(p)) return NULL;
     } else {
         // namespace::@name(...)
         Lexer lexer = p->lexer;
         Token next = lexer_next(&lexer);
         while (tok.kind == TK_IDENT && token_punct(next, "::")) tok = lexer_next(&lexer), next = lexer_next(&lexer);
-        if (!token_punct(tok, "@") || tok.start == parser_peek(p).start || parser_at_type(p)) return NULL;
+        if (!token_punct(tok, "@") || tok.start == parser_peek(p).start || at_type(p)) return NULL;
     }
     Expr* start = expr_new(E_GENERATOR, parser_peek(p), NULL, NULL);
     start->generics = params;
@@ -245,7 +245,7 @@ static inline Expr* parse_ct_external(Parser* p) {
             parser_advance(p);
             parser_advance(p);
         }
-        parser_ct_name(p);
+        ct_name(p);
         start->name = parser_peek(p);
         parser_skip_until(p, ";");
     } else {
@@ -478,6 +478,7 @@ static int ct_bit_field;        // the member that ct_layout found last is a bit
 static long ct_layout(Ctx* c, Token at, Type* type, long* align, const char* member, long* offset, Type** found) {
     Type* k = type_canon(type);
     long unused, size = 0, widest = 1, bit = 0, c_size = 0;
+    long unit_end = 0, unit_bits = 0;    // Microsoft's rule: the open storage unit of bit-fields
     if (!align) align = &unused;
     if (ct_kind(k)) return ct_c_size = *align = ct_kind(k) & 15;
     if (k->kind == TY_ARRAY && k->has_size_value) {
@@ -495,16 +496,40 @@ static long ct_layout(Ctx* c, Token at, Type* type, long* align, const char* mem
             long field_align, inside = 0;
             if (f->verbatim || !f->type || ct_member(f->type) != pass) continue;
             long field_size = ct_layout(c, at, f->type, &field_align, NULL, NULL, NULL);
+            long unit = field_size * 8;
+            if (os_ms_bitfields && unit_bits && !st->is_union && (!f->bits || unit_bits != unit)) {
+                // the open unit ends: what comes next starts after all of it
+                bit = unit_end;
+                unit_bits = 0;
+            }
             long start = st->is_union ? 0 : (bit + field_align * 8 - 1) / (field_align * 8) * (field_align * 8);
             long width = field_size * 8;
-            if (f->bits) {
+            long place = start / 8;
+            if (f->bits && os_ms_bitfields) {
+                // Microsoft's rule: in the open unit if it is of this size and the
+                // bit-field still fits, else in a new unit of its type
+                width = strtol(f->bits, NULL, 0);
+                if (st->is_union) {
+                    start = 0;
+                } else if (!width) {
+                    // closes the open unit (one of another size is closed already)
+                    start = unit_bits ? unit_end : bit;
+                    unit_bits = 0;
+                } else if (unit_bits && bit + width <= unit_end) {
+                    start = bit;
+                } else {
+                    unit_end = start + unit;
+                    unit_bits = unit;
+                }
+                place = (st->is_union || !unit_bits ? start : unit_end - unit) / 8;
+            } else if (f->bits) {
                 // a bit-field goes on where the last one ended, if it still fits in the same unit
                 width = strtol(f->bits, NULL, 0);
                 start = st->is_union ? 0 : bit;
-                if (!width || start / (field_size * 8) != (start + width - 1) / (field_size * 8))
-                    start = (start + field_size * 8 - 1) / (field_size * 8) * (field_size * 8);
+                if (!width || start / unit != (start + width - 1) / unit)
+                    start = (start + unit - 1) / unit * unit;
+                place = start / unit * field_size;
             }
-            long place = f->bits ? start / (field_size * 8) * field_size : start / 8;
             if (member && f->name && strcmp(f->name, member) == 0) {
                 *offset = place;
                 *found = f->type;
@@ -516,7 +541,9 @@ static long ct_layout(Ctx* c, Token at, Type* type, long* align, const char* mem
                 if (*found) *offset = place + inside;
             }
             if (!st->is_union) bit = start + width;
-            if ((start + width + 7) / 8 > size) size = (start + width + 7) / 8;
+            long end = os_ms_bitfields && f->bits && unit_bits && !st->is_union ? unit_end : start + width;
+            if (os_ms_bitfields && f->bits && st->is_union) end = unit;
+            if ((end + 7) / 8 > size) size = (end + 7) / 8;
             if (field_align > widest) widest = field_align;
         }
         if (!pass) c_size = (size + widest - 1) / widest * widest;
@@ -882,6 +909,17 @@ static void ct_global_value(Ctx* c, Token at, CtGlobal* g) {
     g->state = 2;
 }
 
+// Returns the count of a shift of a value of the given type: shifting by a
+// negative count or by the type's width or more is undefined in C, and C
+// compilers and processors give different results for it, so it is an error.
+static int ct_shift_count(Ctx* c, Token at, Type* type, Word count) {
+    int bits = (ct_kind(type) & 15) * 8;
+    if (count < 0 || count >= bits)
+        FAIL(c, at, "shift by %lld at compile time: '%s' has %d bits, so the count must be 0 to %d",
+             (long long)count, type_show(type), bits, bits - 1);
+    return (int)count;
+}
+
 // Applies a binary operator to two numbers of the same type.
 static Word ct_operate(Ctx* c, Token at, const char* op, Type* type, Word a, Word b) {
     int kind = ct_kind(type), is_unsigned = kind & CT_UNSIGNED, twice = op[1] == op[0], equal = op[1] == '=';
@@ -912,10 +950,13 @@ static Word ct_operate(Ctx* c, Token at, const char* op, Type* type, Word a, Wor
             if (is_unsigned) return (Word)(*op == '/' ? ua / ub : ua % ub);
             return *op == '/' ? a / b : a % b;
         case '<':
-            if (twice) return (Word)(ua << (b & 63));
+            if (twice) return (Word)(ua << ct_shift_count(c, at, type, b));
             return is_unsigned ? (equal ? ua <= ub : ua < ub) : (equal ? a <= b : a < b);
         case '>':
-            if (twice) return is_unsigned ? (Word)(ua >> (b & 63)) : a >> (b & 63);
+            if (twice) {
+                int count = ct_shift_count(c, at, type, b);
+                return is_unsigned ? (Word)(ua >> count) : a >> count;
+            }
             return is_unsigned ? (equal ? ua >= ub : ua > ub) : (equal ? a >= b : a > b);
     }
     FAIL(c, at, "operator '%s' cannot be applied to a value of type '%s' at compile time", op, type_show(type));
@@ -1417,7 +1458,9 @@ static int ct_builtin(Ctx* c, Expr* call, Token at, CtValue* out) {
             for (int i = 0; i < u->nfields; i++) {
                 long long value = 0;
                 if (!u->fields[i].name) continue;
-                enum_value(u, u->fields[i].name, &value);
+                if (!enum_value(u, u->fields[i].name, &value))
+                    FAIL(c, at, "'@enumerators' needs the value of '%s' in '%s', which is not known at compile time",
+                         u->fields[i].name, type_show(type));
                 ct_set(c, at, memory + n * size, record, "name", (Word)(intptr_t)ct_str(u->fields[i].name));
                 ct_set(c, at, memory + n++ * size, record, "value", value);
             }
