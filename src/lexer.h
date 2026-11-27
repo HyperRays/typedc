@@ -122,6 +122,12 @@ typedef struct Token {
     // they are the `lead` bytes ending at `start`
     size_t lead;
 
+    // A name that an included header defines as a C keyword, as <complex.h>
+    // defines `complex` as `_Complex`: the keyword it stands for, which
+    // token_is and tok_str go by. Where the token is and the comments in front
+    // of it stay those of the name in the source. NULL for other tokens.
+    const char* keyword;
+
 } Token;
 
 typedef struct {
@@ -244,6 +250,7 @@ static inline int is_keyword(const char *start, size_t length, int c_only) {
 static inline int token_is(Token token, const char *text) {
     size_t length = strlen(text);
 
+    if (token.keyword) return strcmp(token.keyword, text) == 0;
     return token.length == length &&
            memcmp(token.start, text, length) == 0;
 }

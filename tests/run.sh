@@ -18,6 +18,7 @@ out=$(mktemp -d)
 failed=0
 
 for f in "$dir"/*.tc "$dir"/*/main.tc examples/*.tc; do
+    ts=$(date +%s%N)
     name=$(basename "$(dirname "$f")")_$(basename "$f" .tc)
     # examples/toml.tc imports `std`, which is found from the repository root
     case "$f" in
@@ -25,6 +26,10 @@ for f in "$dir"/*.tc "$dir"/*/main.tc examples/*.tc; do
         *) set -- ;;
     esac
     if [ -n "$TYPEDCC" ]; then
+        # TinyCC has no complex numbers
+        case "$f" in
+            */complex.tc) echo "skip $name: TinyCC has no complex numbers"; continue ;;
+        esac
         if ! $RUN $TYPEDCC "$@" "$f" -o "$out/$name$EXE" 2> "$out/$name.err"; then
             echo "FAIL $name: rejected"; cat "$out/$name.err"; failed=1; continue
         fi
@@ -46,10 +51,11 @@ for f in "$dir"/*.tc "$dir"/*/main.tc examples/*.tc; do
     if [ -s "$out/$name.want" ] && ! diff "$out/$name.want" "$out/$name.got"; then
         echo "FAIL $name: wrong output"; failed=1; continue
     fi
-    echo "ok   $name"
+    echo "ok   $name ($((($(date +%s%N) - $ts)/1000000))ms)"
 done
 
 for f in "$dir"/errors/*.tc; do
+    ts=$(date +%s%N)
     name=$(basename "$f" .tc)
     want=$(head -1 "$f" | sed 's|^// expect: ||')
     if $RUN ${TYPEDCC:-"$typedc"} --check "$f" > /dev/null 2> "$out/$name.err"; then
@@ -59,7 +65,7 @@ for f in "$dir"/errors/*.tc; do
     elif ! grep -qF "$want" "$out/$name.err"; then
         echo "FAIL $name: expected '$want'"; cat "$out/$name.err"; failed=1
     else
-        echo "ok   $name"
+        echo "ok   $name ($((($(date +%s%N) - $ts)/1000000))ms)"
     fi
 done
 

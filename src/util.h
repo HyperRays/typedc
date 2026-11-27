@@ -93,6 +93,7 @@ static inline char* xstrn(const char* s, size_t n) {
 }
 
 static inline char* tok_str(Token tok) {
+    if (tok.keyword) return xstrn(tok.keyword, strlen(tok.keyword));
     return xstrn(tok.start ? tok.start : "", tok.start ? tok.length : 0);
 }
 

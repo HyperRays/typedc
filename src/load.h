@@ -169,6 +169,22 @@ static int env_lookup_type(void* env, const Token* segments, int count) {
     return 0;
 }
 
+// The C keyword that an included header defines a name as: a macro whose body
+// is that keyword and nothing else, as <complex.h> defines `complex`. A macro
+// that stands for a whole type (`bool`) is a type name instead (macro_try_type).
+static const char* env_lookup_keyword(void* env, Token name) {
+    SrcFile* f = (SrcFile*)env;
+    if (!f->cunit) return NULL;
+    char buffer[256];
+    Entity* e = (Entity*)map_get(&f->cunit->names, token_name(name, buffer, sizeof buffer));
+    if (!e || e->kind != ENT_MACRO || !e->macro_body) return NULL;
+    const char* body = e->macro_body;
+    size_t length = strlen(body);
+    while (length && isspace((unsigned char)body[length - 1])) length--;
+    if (!is_keyword(body, length, 1)) return NULL;
+    return body[length] ? xstrn(body, length) : body;
+}
+
 static int env_lookup_dotop(void* env, Token name, int* left_bp, int* right_bp) {
     SrcFile* f = (SrcFile*)env;
     char buffer[256];
@@ -728,6 +744,8 @@ static inline void file_parse(SrcFile* f) {
     p.lookup_type = env_lookup_type;
     p.lookup_dotop = env_lookup_dotop;
     p.lookup_generic = env_lookup_generic;
+    p.lookup_keyword = env_lookup_keyword;
+    p.token = keyword_macro(&p, p.token);     // read before the parser knew the headers
     f->constants = (ConstantBatch*)xalloc(sizeof(ConstantBatch));
     p.constants = &f->constants->exprs;
     f->ast = parse_translation_unit(&p);
@@ -900,11 +918,15 @@ static const char* constant_batched(SrcFile* f, Token source) {
     return (const char*)map_get(&batch->expanded, key);
 }
 
-// Some macros stand for a type (`bool`, `complex`, ...). Those must act as type
-// names, or declarations using them could not be parsed.
+// Some macros stand for a whole type (`bool`). Those must act as type names, or
+// declarations using them could not be parsed. One that stands for a keyword
+// that is only part of a type (`complex`) is that keyword (env_lookup_keyword).
 static inline void macro_try_type(SrcFile* f, Entity* e, Parser* p) {
     const char* body = e->macro_body;
     if (!body || !(isalpha((unsigned char)body[0]) || body[0] == '_')) return;
+    // `_Complex` is part of a type in C11 and never one by itself, though as an
+    // extension it is read as `double _Complex`
+    if (strcmp(body, "_Complex") == 0) return;
     *p = parser_new_header(body);
     p->filename = "<macro>";
     p->strict_types = 1;
@@ -962,8 +984,17 @@ static inline Module* cunit_for_file(SrcFile* f) {
     if (!f->includes.len) return NULL;
     const char* dir = path_dir(f->path);
     Buf text = {0};
-    for (size_t i = 0; i < f->includes.len; i++)
-        buf_printf(&text, "%s\n", (const char*)f->includes.items[i]);
+    for (size_t i = 0; i < f->includes.len; i++) {
+        // An #include that is already in the list adds nothing: only #include
+        // lines stand between the two, so the header sees the same macros
+        // again. Leaving it out lets a file of an '@' function, which repeats
+        // the #include lines of its file, share that file's headers.
+        const char* line = (const char*)f->includes.items[i];
+        int repeated = 0;
+        for (size_t k = 0; k < i && !repeated; k++)
+            repeated = strcmp((const char*)f->includes.items[k], line) == 0;
+        if (!repeated) buf_printf(&text, "%s\n", line);
+    }
     const char* key = xstrf("%s\n%s", dir, buf_str(&text));
     Module* unit = (Module*)map_get(&g_cunits, key);
     if (unit) return unit;

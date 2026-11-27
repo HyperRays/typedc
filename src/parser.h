@@ -124,6 +124,8 @@ typedef struct Parser {
     int (*lookup_dotop)(void* env, Token name, int* left_bp, int* right_bp);
     // is this name (or `.member`) declared somewhere with generic parameters?
     int (*lookup_generic)(void* env, const Token* segments, int count, int member);
+    // the C keyword that an included header defines this name as, or NULL
+    const char* (*lookup_keyword)(void* env, Token name);
 
     int const_args;             // constant generic arguments parsed so far
 
@@ -640,8 +642,18 @@ static inline void parser_skip_noise(Parser* p) {
     }
 }
 
+// A name that an included header defines as a C keyword is that keyword
+static inline Token keyword_macro(Parser* p, Token tok) {
+    if (tok.kind != TK_IDENT || !p->lookup_keyword) return tok;
+    const char* keyword = p->lookup_keyword(p->env, tok);
+    if (!keyword) return tok;
+    tok.kind = TK_KEYWORD;
+    tok.keyword = keyword;
+    return tok;
+}
+
 static inline Token parser_advance(Parser* p) {
-    p->token = lexer_next(&p->lexer);
+    p->token = keyword_macro(p, lexer_next(&p->lexer));
     #ifdef PARSER_TRACE
     debug("ADVANCE", p->token);
     #endif
@@ -666,7 +678,7 @@ static inline Token parser_peek(Parser* p) {
 // The token after the current one
 static inline Token parser_peek2(Parser* p) {
     Lexer lexer = p->lexer;
-    return lexer_next(&lexer);
+    return keyword_macro(p, lexer_next(&lexer));
 }
 
 static inline int parser_expect(Parser* p, const char* e) {

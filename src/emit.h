@@ -436,6 +436,10 @@ static Output emit_program(const char* guard_name, const char* api_include, int 
     for (size_t u = 0; u < g_cunits.len && !has_size_t; u++)
         has_size_t = map_has(&((Module*)g_cunits.vals[u])->names, "size_t");
     if (!has_size_t) buf_puts(head, "#include <stddef.h>\n");
+    // a complex number that compile-time code made is written with CMPLX (ct_text_complex)
+    if (ct_complex_written && !map_has(&seen, "#include <complex.h>")) buf_puts(head, "#include <complex.h>\n");
+    // and an infinity or a NaN with INFINITY or NAN (ct_text_float)
+    if (ct_math_written && !map_has(&seen, "#include <math.h>")) buf_puts(head, "#include <math.h>\n");
     buf_putc(head, '\n');
 
     // 2. declarations

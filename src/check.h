@@ -20,6 +20,7 @@ static void impl_prepare(Impl* im);
 static const char* type_decl(Type* t, const char* name, Type* define, int indent);
 static int const_eval(Ctx* c, Expr* e, long long* out);
 static Type* number_type(Token tok);
+static int number_imaginary(Token tok);
 
 // Where the checker meets compile-time code, it calls into comptime.h
 static int gen_ct_stmt(Ctx* c, Expr* s, Buf* out, int ind);
@@ -1546,11 +1547,19 @@ static Type* number_type(Token tok) {
         if (ch == '.' || (!hex && (ch == 'e' || ch == 'E')) || (hex && (ch == 'p' || ch == 'P')))
             floating = 1;
     }
-    char last = n ? s[n - 1] : 0;
     if (floating) {
-        if (last == 'f' || last == 'F') return type_builtin(BK_FLOAT);
-        if (last == 'l' || last == 'L') return type_builtin(BK_LDOUBLE);
-        return type_builtin(BK_DOUBLE);
+        // the letters at the end: f or l for the type, and i or j for an imaginary number
+        int is_float = 0;
+        int is_long = 0;
+        for (size_t i = n; i-- > 0 && isalpha((unsigned char)s[i]);) {
+            if (s[i] == 'f' || s[i] == 'F') is_float = 1;
+            if (s[i] == 'l' || s[i] == 'L') is_long = 1;
+        }
+        BuiltinKind kind = BK_DOUBLE;
+        if (is_float) kind = BK_FLOAT;
+        else if (is_long) kind = BK_LDOUBLE;
+        if (number_imaginary(tok)) kind = (BuiltinKind)(BK_CFLOAT + (kind - BK_FLOAT));
+        return type_builtin(kind);
     }
     int is_unsigned = 0, longs = 0;
     for (size_t i = n; i-- > 0 && strchr("uUlL", s[i]);) {
@@ -1560,6 +1569,15 @@ static Type* number_type(Token tok) {
     if (longs >= 2) return type_builtin(is_unsigned ? BK_ULLONG : BK_LLONG);
     if (longs == 1) return type_builtin(is_unsigned ? BK_ULONG : BK_LONG);
     return type_builtin(is_unsigned ? BK_UINT : BK_INT);
+}
+
+// Whether a number is imaginary, as GCC and Clang have it as an extension:
+// with i or j among the letters at its end (2.0i, 1.5if). It is complex then,
+// with no real part.
+static int number_imaginary(Token tok) {
+    for (size_t i = tok.length; i-- > 0 && isalpha((unsigned char)tok.start[i]);)
+        if (strchr("iIjJ", tok.start[i])) return 1;
+    return 0;
 }
 
 // The usual arithmetic conversions, closely enough to type sub-expressions
