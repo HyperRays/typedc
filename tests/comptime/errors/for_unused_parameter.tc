@@ -1,0 +1,5 @@
+// expect: generic parameter 'U' does not occur in the type arguments of the call
+typedef<T> struct { T value; } Box<T>;
+void @visit<T>() { }
+for<T, U> @visit<Box<T>>();
+Box<int> used;

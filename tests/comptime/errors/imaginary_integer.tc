@@ -1,0 +1,3 @@
+// expect: '2i' is an imaginary integer, of a complex integer type that typedc does not have
+#include <complex.h>
+int main(void) { @double complex z = 2i; return 0; }

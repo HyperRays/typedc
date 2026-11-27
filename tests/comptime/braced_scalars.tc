@@ -1,0 +1,34 @@
+// C lets a value that is neither a struct nor an array be initialized with one
+// value in braces, and so does compile-time code. A compound literal of such
+// a type is that value.
+
+#include <stdio.h>
+#include <complex.h>
+
+typedef struct { int a; double b; const char* s; } S;
+
+int @sum(void) {
+    int x = {5};
+    double d = {1.5};
+    return x + (int)d;
+}
+S @make(void) {
+    S s = { {1}, {2.5}, {"hi"} };
+    return s;
+}
+int @literals(void) { return (int){41} + (int[3]){ 1, 2, 3 }[2] - 2; }
+
+static const S kept = @make();
+
+int main(void) {
+    @int z = {7};
+    @double complex w = {1.0 - 2.0i};
+    @int* p = {0};
+    @int pair[2] = { {3}, 4 };
+    printf("%d %d %g %s %d\n", @sum(), kept.a, kept.b, kept.s, @literals());
+    printf("%d %g%+gi %d %d\n", z, creal(w), cimag(w), p == 0, pair[0] + pair[1]);
+    return 0;
+}
+
+//> 6 1 2.5 hi 42
+//> 7 1-2i 1 7

@@ -1,0 +1,81 @@
+// Complex numbers: the spellings of <complex.h> and the other C11 headers,
+// and complex values that compile-time code holds and calculates with. Each
+// result is compared with what the program calculates when it runs.
+
+#include <stdio.h>
+#include <complex.h>
+#include <stdalign.h>
+#include <assert.h>
+#include <stdnoreturn.h>
+import builtin;
+
+// keywords that headers spell as macros
+static_assert(sizeof(float complex) == 2 * sizeof(float), "a complex number is two of its real type");
+alignas(alignof(double)) static char buffer[sizeof(double complex)];
+noreturn static void stop(void) { for (;;) {} }
+
+typedef struct { int id; double complex z; float complex f; } Item;
+
+double complex @mul(double complex a, double complex b) { return a * b; }
+double complex @div(double complex a, double complex b) { return a / b; }
+float complex @fdiv(float complex a, float complex b) { return a / b; }
+double complex @power(double complex z, int n) {
+    double complex r = 1;
+    for (int i = 0; i < n; i++) r *= z;
+    return r;
+}
+double complex @mixed(int n, float f) { return n + f * 1.0i - 2 / (1.0 + 1.0i); }
+int @truths(double complex z) {
+    return (z ? 1 : 0) | (!z ? 2 : 0) | (z == 1.0i ? 4 : 0) | ((_Bool)z ? 8 : 0) | ((int)(z + 2.9) == 2 ? 16 : 0);
+}
+Item @item(void) {
+    Item it = { 7, 1.0 + 2.0i, conjf(3.0f + 4.0fi) };
+    it.z *= it.z;
+    return it;
+}
+double @imaginary_sum(void) {
+    Item it = @item();
+    double sum = 0;
+    for (@int i = 0; i < @count<Item>(); i++)
+        if (@fields<Item>()[i].kind == builtin::FieldKind::FIELD_CDOUBLE) sum += cimag(it.[@fields<Item>()[i]]);
+    return sum;
+}
+
+static const double complex powers[] = { @power(1.0 + 1.0i, 2), @power(1.0 + 1.0i, 5) };
+static const Item kept = @item();
+
+static void same(const char* what, double complex t, double complex r) {
+    printf("%s %s\n", what, creal(t) == creal(r) && cimag(t) == cimag(r) ? "ok" : "differs");
+}
+
+int main(void) {
+    volatile double one = 1.0;
+    double complex a = (1.5 + 2.0i) * one;
+    double complex b = (-0.5 + 3.0i) * one;
+    float complex fa = (0.1f + 0.2fi) * (float)one;
+    float complex fb = (0.3f + 0.7fi) * (float)one;
+    double complex r = 1;
+    for (int i = 0; i < 5; i++) r *= (1.0 + 1.0i) * one;
+    if (!one) stop();
+    same("multiply", @mul(1.5 + 2.0i, -0.5 + 3.0i), a * b);
+    same("divide", @div(1.5 + 2.0i, -0.5 + 3.0i), a / b);
+    same("divide large", @div(1e300 + 1e300i, 1e300 + 3e300i), (1e300 + 1e300i) * one / ((1e300 + 3e300i) * one));
+    same("divide float", @fdiv(0.1f + 0.2fi, 0.3f + 0.7fi), fa / fb);
+    same("power", powers[1], r);
+    same("mixed", @mixed(3, 0.25f), 3 + 0.25f * one * 1.0i - 2 / ((1.0 + 1.0i) * one));
+    printf("%g%+gi %d %d %d\n", creal(powers[0]), cimag(powers[0]), @truths(1.0i), @truths(0.0i), (int)sizeof buffer);
+    printf("%d %g%+gi %g%+gi %g\n", kept.id, creal(kept.z), cimag(kept.z), crealf(kept.f), cimagf(kept.f), @imaginary_sum());
+    @double complex w = 2.0 - 1.0i;
+    printf("%g %g %g%+gi\n", creal(w), cimag(w), creal(conj(w)), cimag(conj(w)));
+    return 0;
+}
+
+//> multiply ok
+//> divide ok
+//> divide large ok
+//> divide float ok
+//> power ok
+//> mixed ok
+//> 0+2i 29 18 16
+//> 7 -3+4i 3-4i 4
+//> 2 -1 2+1i

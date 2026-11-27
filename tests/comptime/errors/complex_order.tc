@@ -1,0 +1,3 @@
+// expect: operator '<' cannot be applied to a complex number
+#include <complex.h>
+int main(void) { @double complex z = 1.0i; @int less = z < 2.0; return less; }

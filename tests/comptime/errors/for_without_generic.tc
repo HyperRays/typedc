@@ -1,0 +1,3 @@
+// expect: a generator that is started with 'for<...>' needs a generic type with those parameters among its type arguments
+int @answer(void) { return 1; }
+for<T> @answer();

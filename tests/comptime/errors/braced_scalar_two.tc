@@ -1,0 +1,2 @@
+// expect: a value of type 'int' is initialized with one value, and this list has 2
+int main(void) { @int z = {1, 2}; return z; }

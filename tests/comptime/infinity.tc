@@ -1,0 +1,23 @@
+// Infinities and NaNs that compile-time code makes have no literal in C: they
+// are written as INFINITY and NAN of <math.h>, which typedc includes for them,
+// with the type they have.
+
+#include <stdio.h>
+
+double @big(void) { return 1e308 * 10; }
+double @not_a_number(void) { double i = @big(); return i - i; }
+float @fbig(void) { return 1e38f * 10.0f; }
+long double @lbig(void) { return -1e308L * 10; }
+
+static const double table[] = { @big(), -@big(), @not_a_number() };
+static const float f = -@fbig();
+static const long double l = @lbig();
+
+int main(void) {
+    printf("%g %g %s %g %Lg\n", table[0], table[1], table[2] != table[2] ? "nan" : "number", f, l);
+    printf("%d %d %d\n", (int)sizeof(@fbig()), (int)sizeof(@big()), (int)sizeof(@lbig()) == (int)sizeof(long double));
+    return 0;
+}
+
+//> inf -inf nan -inf -inf
+//> 4 8 1
