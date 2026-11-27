@@ -2016,6 +2016,7 @@ static CtReflection ct_reflection(Ctx* c, Token at, int which, Expr* first);
 static Entity* ct_named_entity(Ctx* c, Expr* e);
 static void ct_reflect_records(Ctx* c, Token at, CtReflection* r);
 static void ct_reflect_fields(Ctx* c, Token at, CtReflection* r);
+static void ct_count_enumerators(CtReflection* r);
 static void ct_reflect_enumerators(Ctx* c, Token at, CtReflection* r);
 static void ct_reflect_generics(Ctx* c, Token at, CtReflection* r);
 static const char* ct_reflect_name(CtReflection* r);
@@ -2163,7 +2164,8 @@ static int ct_builtin(Ctx* c, Expr* call, Token at, CtValue* out) {
     if (which == CT_FIELDS || which == CT_ENUMERATORS || which == CT_GENERICS) ct_reflect_records(c, at, &r);
     switch (which) {
         case CT_FIELDS: case CT_COUNT:
-            ct_reflect_fields(c, at, &r);
+            if (which == CT_COUNT && r.k->kind == TY_ENUM) ct_count_enumerators(&r);
+            else ct_reflect_fields(c, at, &r);
             if (which == CT_COUNT) *out = (CtValue){ type_builtin(BK_INT), r.n };
             break;
         case CT_ENUMERATORS:
@@ -2236,8 +2238,9 @@ static void ct_reflect_records(Ctx* c, Token at, CtReflection* r) {
 
 // @fields: a record for each member of a struct; @count only counts them
 static void ct_reflect_fields(Ctx* c, Token at, CtReflection* r) {
+    const char* wanted = r->which == CT_COUNT ? "a struct, union or enum type" : "a struct or union type";
     if (r->k->kind != TY_STRUCT)
-        FAIL(c, at, "'%s' needs a struct or union type, but '%s' is not one", ct_builtin_names[r->which], type_show(r->type));
+        FAIL(c, at, "'%s' needs %s, but '%s' is not one", ct_builtin_names[r->which], wanted, type_show(r->type));
     struct_resolve(r->u);
     for (int i = 0; i < r->u->nfields; i++) {
         Field* f = &r->u->fields[i];
@@ -2260,6 +2263,13 @@ static void ct_reflect_fields(Ctx* c, Token at, CtReflection* r) {
         ct_set(c, at, record, r->record, "type", (Word)(intptr_t)f->type);
         ct_set(c, at, record, r->record, "__of", (Word)(intptr_t)r->type);
     }
+}
+
+// @count of an enum: how many enumerators @enumerators lists for it
+static void ct_count_enumerators(CtReflection* r) {
+    struct_resolve(r->u);
+    for (int i = 0; i < r->u->nfields; i++)
+        if (r->u->fields[i].name) r->n++;
 }
 
 // @enumerators: a record for each enumerator, with its value

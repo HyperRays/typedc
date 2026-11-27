@@ -18,7 +18,7 @@ int @fib(int n) {
 }
 
 // The predefined '@' functions ask the compiler about the program.
-// @count<T>() is the number of members of a struct.
+// @count<T>() is the number of members of a struct, or of enumerators of an enum.
 int @int_fields<T>() {
     int found = 0;
     for (int i = 0; i < @count<T>(); i++)
@@ -52,7 +52,7 @@ void print<T>(T* value) {
 // The enumerators of an enum, as names and values
 const char* state_name(State s) {
     const builtin::@Enumerator all[] = @enumerators<State>();
-    for (@int i = 0; i < 3; i++)
+    for (@int i = 0; i < @count<State>(); i++)
         if (s == all[i].value) return all[i].name;
     return "?";
 }

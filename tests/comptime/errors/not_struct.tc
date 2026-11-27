@@ -1,2 +1,2 @@
-// expect: '@count' needs a struct or union type, but 'int' is not one
+// expect: '@count' needs a struct, union or enum type, but 'int' is not one
 int main(void) { return @count<int>(); }
