@@ -20,18 +20,49 @@
 // Syntax
 // ---------------------------------------------------------------------------
 
+// The parser calls the entry points of each group below (it declares them in
+// parser.h); the helpers of a group follow it. The checker uses the last two.
+
+static inline void  ct_name(Parser* p);
+static inline void  parse_ct_splice(Parser* p);
+
+static inline int   at_ct_type(Parser* p);
+static inline int   parse_ct_mark(Parser* p);
+static inline Expr* parse_ct_spec(Parser* p, int* quals);
+
+static inline Expr* parse_ct_block_item(Parser* p);
+
+static inline int   parse_ct_member(Parser* p, Expr* member);
+
+static inline int   parse_ct_control(Parser* p, Expr* owner, int in);
+static inline int   at_ct_declaration(Parser* p, int in);
+static inline Expr* parse_ct_condition(Parser* p);
+static inline Expr* parse_ct_for_init(Parser* p);
+static inline Expr* parse_ct_for_condition(Parser* p);
+static inline Expr* parse_ct_for_increment(Parser* p);
+static inline Expr* parse_ct_body(Parser* p);
+static inline Expr* parse_ct_members(Parser* p, int in);
+static inline void  istack_ct_branch(Expr* context, Expr* stack[256], size_t* idx);
+
+static inline Expr* parse_ct_external(Parser* p);
+static inline int   at_ct_generator(Parser* p);
+
+static inline void  parse_ct_skip_body(Parser* p, Expr* def);
+static inline void  skip_ct_emit(Parser* p, Expr* def);
+
+static int ct_spliced(Token name);
+static int ct_spec(Expr* spec);
+
 static Map ct_splices;          // where an @ident(...) starts in the source -> its arguments, as an E_LIST
 static int ct_emits;            // how many '@emit' the program has
+static int ct_members_in;       // what the members of the control being parsed are: E_TY_STRUCT, E_IMPL or
+                                // E_TRAIT; set by parse_ct_control for parse_ct_body, which takes only the parser
 
-// Returns whether a name is an @ident(...), which is evaluated to the name it stands for.
-static int ct_spliced(Token name) {
-    return name.length > 7 && memcmp(name.start, "@ident(", 7) == 0;
-}
+// Names
 
 // Called where a name can stand. If the parser is at an '@' that is directly
 // followed by an identifier, the two become one token, an identifier whose
-// text starts with '@'. An `@ident(...)` becomes one such token as a whole,
-// and its arguments are kept for when the name is needed.
+// text starts with '@'. An `@ident(...)` becomes one such token as a whole.
 static inline void ct_name(Parser* p) {
     Token at = p->token;
     Token name = parser_peek2(p);
@@ -40,7 +71,12 @@ static inline void ct_name(Parser* p) {
     p->token.start = at.start;
     p->token.length++;
     p->token.col = at.col;
-    if (!token_ident(p->token, "@ident") || !token_punct(parser_peek2(p), "(")) return;
+    if (token_ident(p->token, "@ident") && token_punct(parser_peek2(p), "(")) parse_ct_splice(p);
+}
+
+// At the `@ident` of an `@ident(...)`: takes the arguments, keeps them for when
+// the name is needed, and makes the whole of it the current token
+static inline void parse_ct_splice(Parser* p) {
     Token first = p->token;
     Expr* args = expr_new(E_LIST, first, NULL, NULL);
     parser_advance(p);
@@ -58,6 +94,8 @@ static inline void ct_name(Parser* p) {
     p->token.length = (size_t)(close.start + 1 - first.start);
 }
 
+// Types
+
 // Returns whether the '@' the parser is at starts a type: `@int` does, and so
 // do `@Name` when `Name` is a type, `@Type`, and `@type(...)`. Anything else,
 // such as `@name(...)`, is a call.
@@ -65,10 +103,11 @@ static inline int at_ct_type(Parser* p) {
     Token name = parser_peek2(p);
     if (name.kind == TK_KEYWORD) return token_is_type_keyword(name);
     if (name.kind != TK_IDENT || name.start != p->token.start + 1) return 0;
+    if (token_ident(name, "Type") || token_ident(name, "type")) return 1;
     Token whole = name;         // a type that was declared with the '@' in its name
     whole.start--;
     whole.length++;
-    return token_ident(name, "Type") || token_ident(name, "type") || is_type_path(p, &name, 1) || is_type_path(p, &whole, 1);
+    return is_type_path(p, &name, 1) || is_type_path(p, &whole, 1);
 }
 
 // Takes the '@' of `namespace::@Name`, which asks for the compile-time
@@ -109,6 +148,8 @@ static inline Expr* parse_ct_spec(Parser* p, int* quals) {
     return spec;
 }
 
+// Statements
+
 // block-item = ...existing... | import-declaration | "@emit" external-declaration
 static inline Expr* parse_ct_block_item(Parser* p) {
     Token tok = parser_peek(p);
@@ -121,6 +162,8 @@ static inline Expr* parse_ct_block_item(Parser* p) {
     return expr_new(E_EMIT, tok, parse_external_declaration(p), NULL);
 }
 
+// Members
+
 // Called behind the '.' or '->' of a member access or of a designator. Takes
 // a `[expression]`, which names the member by a compile-time value, and
 // returns whether there was one.
@@ -132,10 +175,24 @@ static inline int parse_ct_member(Parser* p, Expr* member) {
     parser_advance(p);
     Expr* field = parse_expression(p);
     parser_expect(p, "]");
-    if (member->kind == E_DESIG) member->left = field, member->aux = 1;
-    else member->right = field;
+    if (member->kind == E_DESIG) {
+        member->left = field;
+        member->aux = 1;
+    } else {
+        member->right = field;
+    }
     return 1;
 }
+
+// Compile-time control among members
+//
+// X-control = "if" "(" expression ")" X-body [ "else" X-body ]
+//           | "for" "(" [ declaration | expression ";" ] [ expression ] ";" [ expression ] ")" X-body
+//           | "while" "(" expression ")" X-body
+// X-body    = X-member | "{" { X-member } "}"
+// E_IF / E_WHILE: cases as for the statements; E_FOR: cases[0] = { base_case,
+// condition, increment, block }, with the increment not wrapped in an E_COND.
+// In the first pass the parentheses are skipped, and what they hold is NULL.
 
 // Returns whether a declaration of compile-time variables stands where a
 // member is expected: something with an initializer, or, where the members
@@ -155,7 +212,43 @@ static inline int at_ct_declaration(Parser* p, int in) {
     }
 }
 
-// X-body = X-member | "{" { X-member } "}"
+// The condition of an `if` or `while`, or a placeholder in the first pass
+static inline Expr* parse_ct_condition(Parser* p) {
+    if (!p->prescan) return parse_if_cond(p);
+    Expr* skipped = expr_new(E_ALL, parser_peek(p), NULL, NULL);
+    parser_skip_until(p, ")");
+    return skipped;
+}
+
+// The first clause of a `for`, its ';' included, or a placeholder in the first
+// pass, which skips the whole parentheses here
+static inline Expr* parse_ct_for_init(Parser* p) {
+    if (!p->prescan) return parse_for_init(p);
+    Expr* skipped = expr_new(E_ALL, parser_peek(p), NULL, NULL);
+    parser_skip_until(p, ")");
+    return skipped;
+}
+
+// The condition of a `for` and its ';', or a placeholder
+static inline Expr* parse_ct_for_condition(Parser* p) {
+    if (p->prescan) return expr_new(E_ALL, parser_peek(p), NULL, NULL);
+    Expr* condition = parse_for_cond(p);
+    parser_expect(p, ";");
+    return condition;
+}
+
+// The increment of a `for`, an expression as it is, or a placeholder
+static inline Expr* parse_ct_for_increment(Parser* p) {
+    if (p->prescan || token_punct(parser_peek(p), ")")) return expr_new(E_ALL, parser_peek(p), NULL, NULL);
+    return parse_expression(p);
+}
+
+// A body: members of the kind ct_members_in says
+static inline Expr* parse_ct_body(Parser* p) {
+    return parse_ct_members(p, ct_members_in);
+}
+
+// A single member, or members between braces, of the kind `in` says
 static inline Expr* parse_ct_members(Parser* p, int in) {
     Expr* list = expr_new(E_LIST, parser_peek(p), NULL, NULL);
     int braces = token_punct(parser_peek(p), "{");
@@ -163,78 +256,129 @@ static inline Expr* parse_ct_members(Parser* p, int in) {
     do {
         if (braces && token_punct(parser_peek(p), "}")) break;
         if (parser_peek(p).kind == TK_EOF) parser_fail(p, parser_peek(p), "expected '}' before end of file");
-        if (in == E_TY_STRUCT) parse_struct_member(p, list);
-        else if (!parse_ct_control(p, list, in)) expr_push(list, in == E_IMPL ? parse_method(p) : parse_trait_member(p));
+        if (in == E_TY_STRUCT) {
+            parse_struct_member(p, list);
+        } else if (!parse_ct_control(p, list, in)) {
+            Expr* member = in == E_IMPL ? parse_method(p) : parse_trait_member(p);
+            expr_push(list, member);
+        }
     } while (braces);
     if (braces) parser_advance(p);
     return list;
 }
 
-// X-control = "if" "(" expression ")" X-body [ "else" X-body ]
-//           | "for" "(" [ declaration | expression ";" ] [ expression ] ";" [ expression ] ")" X-body
-//           | "while" "(" expression ")" X-body
+// stack: condition body [ else-body ]
+// As in an `if` statement, with an `else` the first case holds the else branch.
+// Shared by `if` and `while`, which has no `else`.
+static inline void istack_ct_branch(Expr* context, Expr* stack[256], size_t* idx) {
+    Condition* f = (Condition*)xalloc(2 * sizeof(Condition));
+    Expr* condition = stack[0]->kind == E_ALL ? NULL : stack[0];
+    if (*idx == 3) {
+        f[0] = (Condition){ .block = stack[2] };
+        f[1] = (Condition){ .condition = condition, .block = stack[1] };
+    } else {
+        f[0] = (Condition){ .condition = condition, .block = stack[1] };
+    }
+    context->cases = f;
+    context->case_size = *idx == 3 ? 2 : 1;
+}
+
+static const ParseRule ct_if_rule[] = {
+    TOK("if", E_IF),
+    POP,
+
+    // (...)
+    EXPECT("("),
+    REC(parse_ct_condition),
+    EXPECT(")"),
+
+    REC(parse_ct_body),
+
+    BIF("else"),
+        EXPECT("else"),
+        REC(parse_ct_body),
+        POP, // put into return context
+    END,
+
+    ISTACK(istack_ct_branch),
+    END
+};
+
+static const ParseRule ct_for_rule[] = {
+    TOK("for", E_FOR),
+    POP,
+
+    // (...;...;...)
+    EXPECT("("),
+        REC(parse_ct_for_init),
+        // ";" consumed in parse_ct_for_init
+        REC(parse_ct_for_condition),
+        // ";" consumed in parse_ct_for_condition
+        REC(parse_ct_for_increment),
+    EXPECT(")"),
+
+    REC(parse_ct_body),
+
+    ISTACK(istack_for_cond),
+    END
+};
+
+static const ParseRule ct_while_rule[] = {
+    TOK("while", E_WHILE),
+    POP,
+
+    // (...)
+    EXPECT("("),
+    REC(parse_ct_condition),
+    EXPECT(")"),
+
+    REC(parse_ct_body),
+
+    ISTACK(istack_ct_branch),
+    END
+};
+
 // Called where a member of a struct, an impl or a trait is expected. Takes
 // compile-time control, or a declaration of compile-time variables, adds it
 // to the members, and returns whether there was any.
 static inline int parse_ct_control(Parser* p, Expr* owner, int in) {
     Token tok = parser_peek(p);
-    int kind = token_kw(tok, "if") ? E_IF : token_kw(tok, "for") ? E_FOR : token_kw(tok, "while") ? E_WHILE : 0;
-    if (!kind) {
+    const ParseRule* rule = token_kw(tok, "if") ? ct_if_rule
+                          : token_kw(tok, "for") ? ct_for_rule
+                          : token_kw(tok, "while") ? ct_while_rule
+                          : NULL;
+    if (!rule) {
         if (p->prescan || !at_ct_declaration(p, in)) return 0;
         expr_push(owner, parse_declaration(p, 1, 0));
         return 1;
     }
-    Expr* control = expr_new((ExprKind)kind, tok, NULL, NULL);
-    Condition* f = (Condition*)xalloc(2 * sizeof(Condition));
+    // controls nest: a struct can stand in a condition
+    int outer = ct_members_in;
+    ct_members_in = in;
     size_t scope = parser_scope_push(p);
-    parser_advance(p);
-    parser_expect(p, "(");
-    if (p->prescan) {
-        parser_skip_until(p, ")");
-    } else if (kind == E_FOR) {
-        if (token_punct(parser_peek(p), ";")) parser_advance(p);
-        else f->base_case = parse_for_init(p);
-        if (!token_punct(parser_peek(p), ";")) f->condition = parse_if_cond(p);
-        parser_expect(p, ";");
-        if (!token_punct(parser_peek(p), ")")) f->increment = parse_expression(p);
-    } else {
-        f->condition = parse_if_cond(p);
-    }
-    parser_expect(p, ")");
-    f->block = parse_ct_members(p, in);
-    control->cases = f;
-    control->case_size = 1;
-    if (kind == E_IF && token_kw(parser_peek(p), "else")) {
-        // as in an `if` statement, the first case then holds the else branch
-        parser_advance(p);
-        f[1] = f[0];
-        f[0] = (Condition){ .block = parse_ct_members(p, in) };
-        control->case_size = 2;
-    }
+    Expr* control = parse_rule(p, rule);
     parser_scope_pop(p, scope);
-    expr_push(owner, control);
+    ct_members_in = outer;
+    if (control) expr_push(owner, control);
     return 1;
 }
+
+// END Compile-time control among members
+
+// Generators
 
 // generator-start          = ct-call ";"
 // deferred-generator-start = "for" generic-parameters ct-call ";"
 // Called where a declaration at file scope is expected. Returns the start of
 // a generator, or NULL if what stands there is something else.
 static inline Expr* parse_ct_external(Parser* p) {
-    Token tok = parser_peek(p);
+    int deferred = token_kw(parser_peek(p), "for");
+    if (!deferred && !at_ct_generator(p)) return NULL;
     Expr* params = NULL;
     size_t scope = parser_scope_push(p);
-    if (token_kw(tok, "for")) {
+    if (deferred) {
         parser_advance(p);
         params = parse_generic_params(p);
-    } else if (token_punct(tok, "@")) {
-        if (at_ct_type(p)) return NULL;
-    } else {
-        // namespace::@name(...)
-        Lexer lexer = p->lexer;
-        Token next = lexer_next(&lexer);
-        while (tok.kind == TK_IDENT && token_punct(next, "::")) tok = lexer_next(&lexer), next = lexer_next(&lexer);
-        if (!token_punct(tok, "@") || tok.start == parser_peek(p).start || at_type(p)) return NULL;
     }
     Expr* start = expr_new(E_GENERATOR, parser_peek(p), NULL, NULL);
     start->generics = params;
@@ -256,41 +400,70 @@ static inline Expr* parse_ct_external(Parser* p) {
     return start;
 }
 
+// Returns whether a call of an '@' function stands here: `@name(...)` that is
+// not a type, or `namespace::@name(...)` that is not a type name
+static inline int at_ct_generator(Parser* p) {
+    Token tok = parser_peek(p);
+    if (token_punct(tok, "@")) return !at_ct_type(p);
+    Lexer lexer = p->lexer;
+    Token next = lexer_next(&lexer);
+    while (tok.kind == TK_IDENT && token_punct(next, "::")) {
+        tok = lexer_next(&lexer);
+        next = lexer_next(&lexer);
+    }
+    return token_punct(tok, "@") && tok.start != parser_peek(p).start && !at_type(p);
+}
+
+// The first pass over function bodies
+
 // Skips the body of a function in the first pass over a file. What the body
 // of an '@' function imports and includes is added to the function, because
 // the namespaces have to be loaded before anything is parsed in full.
 static inline void parse_ct_skip_body(Parser* p, Expr* def) {
-    int depth = 0, at = *def->name.start == '@';
+    int depth = 0;
+    int is_ct_function = *def->name.start == '@';
     do {
         Token tok = parser_peek(p);
         if (tok.kind == TK_EOF) parser_fail(p, tok, "expected '}' before end of file");
-        if (at && token_kw(tok, "import")) {
+        if (is_ct_function && token_kw(tok, "import")) {
             expr_push(def, parse_import(p));
             continue;
         }
-        if (at && tok.kind == TK_INCLUDE) expr_push(def, expr_new(E_INCLUDE, tok, NULL, NULL));
-        if (at && token_punct(tok, "@") && token_ident(parser_peek2(p), "emit")) {
-            // A type that is emitted under a plain name is a type name where the
-            // function is used, which the parser has to know: the name is noted.
-            Token last = tok;
-            int inner = 0;
-            parser_advance(p);
-            parser_advance(p);
-            if (!token_kw(parser_peek(p), "typedef")) continue;
-            for (;; parser_advance(p)) {
-                Token t = parser_peek(p);
-                if (t.kind == TK_EOF || (!inner && token_punct(t, ";"))) break;
-                if (token_punct(t, "{") || token_punct(t, "(") || token_punct(t, "[")) inner++;
-                if (token_punct(t, "}") || token_punct(t, ")") || token_punct(t, "]")) inner--;
-                if (!inner) last = t;
-            }
-            if (last.kind == TK_IDENT) expr_push(def, expr_new(E_IDENT, last, NULL, NULL));
+        if (is_ct_function && tok.kind == TK_INCLUDE) expr_push(def, expr_new(E_INCLUDE, tok, NULL, NULL));
+        if (is_ct_function && token_punct(tok, "@") && token_ident(parser_peek2(p), "emit")) {
+            skip_ct_emit(p, def);
             continue;
         }
         if (token_punct(tok, "{")) depth++;
         else if (token_punct(tok, "}")) depth--;
         parser_advance(p);
     } while (depth > 0);
+}
+
+// At the '@' of an `@emit`: takes the '@emit'. A type that is emitted under a
+// plain name is a type name where the function is used, which the parser has
+// to know: when a typedef is emitted, its name is noted in `def`.
+static inline void skip_ct_emit(Parser* p, Expr* def) {
+    Token last = parser_peek(p);
+    int inner = 0;
+    parser_advance(p);
+    parser_advance(p);
+    if (!token_kw(parser_peek(p), "typedef")) return;
+    for (;; parser_advance(p)) {
+        Token t = parser_peek(p);
+        if (t.kind == TK_EOF || (!inner && token_punct(t, ";"))) break;
+        if (token_punct(t, "{") || token_punct(t, "(") || token_punct(t, "[")) inner++;
+        if (token_punct(t, "}") || token_punct(t, ")") || token_punct(t, "]")) inner--;
+        if (!inner) last = t;
+    }
+    if (last.kind == TK_IDENT) expr_push(def, expr_new(E_IDENT, last, NULL, NULL));
+}
+
+// For the checker
+
+// Returns whether a name is an @ident(...), which is evaluated to the name it stands for.
+static int ct_spliced(Token name) {
+    return name.length > 7 && memcmp(name.start, "@ident(", 7) == 0;
 }
 
 // Returns whether a declaration with these specifiers declares compile-time variables.
@@ -350,6 +523,13 @@ typedef struct {
 
 enum { CT_BREAK = 1, CT_CONTINUE, CT_RETURN };
 
+// Where the members of a struct have got to while it is laid out
+typedef struct {
+    long bit;                   // where the next member may start, in bits
+    long unit_end;              // Microsoft's rule: where the open storage unit of bit-fields ends,
+    long unit_bits;             // and its size; 0 when none is open
+} CtLayoutState;
+
 static CtState g_ct = { .unrolling = -1, .deciding = -1 };
 static Expr* g_ct_pass;         // the statement that is handed back to gen_stmt as it is
 
@@ -370,6 +550,41 @@ static const char* ct_calls[CT_CALLS];  // the functions whose calls are in prog
 static int ct_depth;
 static CtValue ct_result;       // what the `return` that is on its way out returns
 static int ct_dry;              // while this is set, an expression is only asked for its type: nothing is read or changed
+
+static char* ct_at(long place);
+static void* ct_keep(const void* from, size_t size);
+static int ct_kind(Type* type);
+static int ct_complex(Type* type);
+static Type* ct_complex_real(Type* type);
+static Type* ct_complex_of(Type* real);
+static double ct_double(Word bits);
+static Word ct_bits(double d);
+static Word ct_fit(Word a, int kind);
+static Word ct_load(void* address, int kind);
+static void ct_store(void* address, int kind, Word a);
+static int ct_member(Type* type);
+static Type* ct_type_type(void);
+static int ct_is_type(Type* type);
+static long ct_layout(Ctx* c, Token at, Type* type, long* align, const char* member, long* offset, Type** found);
+static long ct_lay_out_member(CtLayoutState* l, Field* f, long field_size, long field_align, int is_union, long* end);
+static long ct_size(Ctx* c, Token at, Type* type);
+static long ct_room(Ctx* c, Token at, long bytes);
+static int ct_reads(Ctx* c, Token at, void* address, long size);
+static int ct_writes(Ctx* c, Token at, void* address, long size);
+static Type* ct_pointee(Type* type);
+static const char* ct_quoted(const char* s);
+static const char* ct_text(Ctx* c, Token at, Type* type, void* address, int braces);
+static const char* ct_text_float(Type* k, Word value);
+static const char* ct_text_pointer(Ctx* c, Token at, Type* k, Word value);
+static const char* ct_text_enum(Ctx* c, Token at, Type* named, Type* k, Word value);
+static const char* ct_text_integer(Type* named, Type* k, int kind, Word value);
+static const char* ct_text_list(Ctx* c, Token at, Type* named, Type* k, void* address, int braces);
+static const char* ct_text_complex(Ctx* c, Token at, Type* k, void* address);
+static void ct_complex_parts(Ctx* c, Token at, CtValue value, double* re, double* im);
+static CtValue ct_complex_make(Ctx* c, Token at, Type* type, double re, double im);
+
+static int ct_complex_written;  // a complex number was written into the generated C, which then includes <complex.h>
+static int ct_math_written;     // so was an infinity or a NaN, and it includes <math.h>
 
 static char* ct_at(long place) {
     return (char*)ct_stack + place;
@@ -401,6 +616,22 @@ static int ct_kind(Type* type) {
     return k->kind == TY_BUILTIN ? kinds[k->builtin] : 0;
 }
 
+// Returns whether a type is one of the complex types
+static int ct_complex(Type* type) {
+    Type* k = type_canon(type);
+    return k->kind == TY_BUILTIN && k->builtin >= BK_CFLOAT && k->builtin <= BK_CLDOUBLE;
+}
+
+// The real type of a complex type: float for float _Complex, and so on
+static Type* ct_complex_real(Type* type) {
+    return type_builtin((BuiltinKind)(BK_FLOAT + (type_canon(type)->builtin - BK_CFLOAT)));
+}
+
+// The complex type of a real floating type
+static Type* ct_complex_of(Type* real) {
+    return type_builtin((BuiltinKind)(BK_CFLOAT + (type_canon(real)->builtin - BK_FLOAT)));
+}
+
 static double ct_double(Word bits) {
     double d;
     memcpy(&d, &bits, sizeof d);
@@ -419,31 +650,69 @@ static Word ct_fit(Word a, int kind) {
     if (kind & CT_FLOAT) return bits == 32 ? ct_bits((double)(float)ct_double(a)) : a;
     if (kind & CT_TRUTH) return a != 0;
     if (!bits || bits >= 64) return a;
-    UWord mask = (1ULL << bits) - 1, low = (UWord)a & mask;
-    return (kind & CT_UNSIGNED) || !(low >> (bits - 1)) ? (Word)low : (Word)(low | ~mask);
+    UWord mask = (1ULL << bits) - 1;
+    UWord low = (UWord)a & mask;
+    if ((kind & CT_UNSIGNED) || !(low >> (bits - 1))) return (Word)low;
+    return (Word)(low | ~mask);     // negative: the bits above its width are set
 }
 
 static Word ct_load(void* address, int kind) {
-    uint8_t b1; uint16_t b2; uint32_t b4; uint64_t b8; float f;
     switch (kind & 15) {
-        case 1: memcpy(&b1, address, 1); return ct_fit(b1, kind);
-        case 2: memcpy(&b2, address, 2); return ct_fit(b2, kind);
-        case 4:
+        case 1: {
+            uint8_t b1;
+            memcpy(&b1, address, 1);
+            return ct_fit(b1, kind);
+        }
+        case 2: {
+            uint16_t b2;
+            memcpy(&b2, address, 2);
+            return ct_fit(b2, kind);
+        }
+        case 4: {
+            if (kind & CT_FLOAT) {
+                float f;
+                memcpy(&f, address, 4);
+                return ct_bits(f);
+            }
+            uint32_t b4;
             memcpy(&b4, address, 4);
-            memcpy(&f, address, 4);
-            return kind & CT_FLOAT ? ct_bits(f) : ct_fit(b4, kind);
-        default: memcpy(&b8, address, 8); return (Word)b8;
+            return ct_fit(b4, kind);
+        }
+        default: {
+            uint64_t b8;
+            memcpy(&b8, address, 8);
+            return (Word)b8;
+        }
     }
 }
 
 static void ct_store(void* address, int kind, Word a) {
-    uint8_t b1 = (uint8_t)a; uint16_t b2 = (uint16_t)a; uint32_t b4 = (uint32_t)a; uint64_t b8 = (uint64_t)a;
-    float f = kind & CT_FLOAT ? (float)ct_double(a) : 0;
     switch (kind & 15) {
-        case 1: memcpy(address, &b1, 1); break;
-        case 2: memcpy(address, &b2, 2); break;
-        case 4: memcpy(address, kind & CT_FLOAT ? (void*)&f : (void*)&b4, 4); break;
-        default: memcpy(address, &b8, 8); break;
+        case 1: {
+            uint8_t b1 = (uint8_t)a;
+            memcpy(address, &b1, 1);
+            break;
+        }
+        case 2: {
+            uint16_t b2 = (uint16_t)a;
+            memcpy(address, &b2, 2);
+            break;
+        }
+        case 4: {
+            if (kind & CT_FLOAT) {
+                float f = (float)ct_double(a);
+                memcpy(address, &f, 4);
+                break;
+            }
+            uint32_t b4 = (uint32_t)a;
+            memcpy(address, &b4, 4);
+            break;
+        }
+        default: {
+            uint64_t b8 = (uint64_t)a;
+            memcpy(address, &b8, 8);
+            break;
+        }
     }
 }
 
@@ -477,59 +746,42 @@ static int ct_bit_field;        // the member that ct_layout found last is a bit
 // lie behind the others, so that the others are where they are in C.
 static long ct_layout(Ctx* c, Token at, Type* type, long* align, const char* member, long* offset, Type** found) {
     Type* k = type_canon(type);
-    long unused, size = 0, widest = 1, bit = 0, c_size = 0;
-    long unit_end = 0, unit_bits = 0;    // Microsoft's rule: the open storage unit of bit-fields
+    long unused;
     if (!align) align = &unused;
-    if (ct_kind(k)) return ct_c_size = *align = ct_kind(k) & 15;
+    if (ct_kind(k)) {
+        *align = ct_kind(k) & 15;
+        ct_c_size = *align;
+        return *align;
+    }
     if (k->kind == TY_ARRAY && k->has_size_value) {
-        size = ct_layout(c, at, k->base, align, NULL, NULL, NULL) * k->size_value;
+        long size = ct_layout(c, at, k->base, align, NULL, NULL, NULL) * k->size_value;
         ct_c_size *= k->size_value;
+        return size;
+    }
+    if (ct_complex(k)) {
+        // a complex number is laid out as two numbers of its real type
+        Type* real = type_builtin((BuiltinKind)(BK_FLOAT + (k->builtin - BK_CFLOAT)));
+        long size = ct_layout(c, at, real, align, NULL, NULL, NULL) * 2;
+        ct_c_size = size;
         return size;
     }
     if (k->kind != TY_STRUCT) FAIL(c, at, "values of type '%s' cannot be held at compile time", type_show(type));
     Type* st = type_unq(k);
     struct_resolve(st);
     if (st->opaque) FAIL(c, at, "values of type '%s' cannot be held at compile time: its definition is not known", type_show(type));
+
+    long size = 0;
+    long widest = 1;
+    long c_size = 0;
+    CtLayoutState l = {0};
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < st->nfields; i++) {
             Field* f = &st->fields[i];
-            long field_align, inside = 0;
             if (f->verbatim || !f->type || ct_member(f->type) != pass) continue;
+            long field_align;
             long field_size = ct_layout(c, at, f->type, &field_align, NULL, NULL, NULL);
-            long unit = field_size * 8;
-            if (os_ms_bitfields && unit_bits && !st->is_union && (!f->bits || unit_bits != unit)) {
-                // the open unit ends: what comes next starts after all of it
-                bit = unit_end;
-                unit_bits = 0;
-            }
-            long start = st->is_union ? 0 : (bit + field_align * 8 - 1) / (field_align * 8) * (field_align * 8);
-            long width = field_size * 8;
-            long place = start / 8;
-            if (f->bits && os_ms_bitfields) {
-                // Microsoft's rule: in the open unit if it is of this size and the
-                // bit-field still fits, else in a new unit of its type
-                width = strtol(f->bits, NULL, 0);
-                if (st->is_union) {
-                    start = 0;
-                } else if (!width) {
-                    // closes the open unit (one of another size is closed already)
-                    start = unit_bits ? unit_end : bit;
-                    unit_bits = 0;
-                } else if (unit_bits && bit + width <= unit_end) {
-                    start = bit;
-                } else {
-                    unit_end = start + unit;
-                    unit_bits = unit;
-                }
-                place = (st->is_union || !unit_bits ? start : unit_end - unit) / 8;
-            } else if (f->bits) {
-                // a bit-field goes on where the last one ended, if it still fits in the same unit
-                width = strtol(f->bits, NULL, 0);
-                start = st->is_union ? 0 : bit;
-                if (!width || start / unit != (start + width - 1) / unit)
-                    start = (start + unit - 1) / unit * unit;
-                place = start / unit * field_size;
-            }
+            long end;
+            long place = ct_lay_out_member(&l, f, field_size, field_align, st->is_union, &end);
             if (member && f->name && strcmp(f->name, member) == 0) {
                 *offset = place;
                 *found = f->type;
@@ -537,20 +789,68 @@ static long ct_layout(Ctx* c, Token at, Type* type, long* align, const char* mem
             }
             // the members of a struct without a name are members of the struct around it
             if (member && !f->name && !*found && type_canon(f->type)->kind == TY_STRUCT) {
+                long inside = 0;
                 ct_layout(c, at, f->type, NULL, member, &inside, found);
                 if (*found) *offset = place + inside;
             }
-            if (!st->is_union) bit = start + width;
-            long end = os_ms_bitfields && f->bits && unit_bits && !st->is_union ? unit_end : start + width;
-            if (os_ms_bitfields && f->bits && st->is_union) end = unit;
             if ((end + 7) / 8 > size) size = (end + 7) / 8;
             if (field_align > widest) widest = field_align;
         }
+        // after the first pass: the size in C, without the compile-time members
         if (!pass) c_size = (size + widest - 1) / widest * widest;
     }
     *align = widest;
     ct_c_size = c_size;
     return (size + widest - 1) / widest * widest;
+}
+
+// Places one member of a struct: returns its offset in bytes (for a bit-field,
+// that of its storage unit), sets `end` to where it ends in bits, and moves `l`
+// on past it
+static long ct_lay_out_member(CtLayoutState* l, Field* f, long field_size, long field_align, int is_union, long* end) {
+    long unit = field_size * 8;
+    if (os_ms_bitfields && l->unit_bits && !is_union && (!f->bits || l->unit_bits != unit)) {
+        // the open unit ends: what comes next starts after all of it
+        l->bit = l->unit_end;
+        l->unit_bits = 0;
+    }
+    long start = is_union ? 0 : (l->bit + field_align * 8 - 1) / (field_align * 8) * (field_align * 8);
+    long width = unit;
+    long place = start / 8;
+    if (f->bits && os_ms_bitfields) {
+        // Microsoft's rule: in the open unit if it is of this size and the
+        // bit-field still fits, else in a new unit of its type
+        width = strtol(f->bits, NULL, 0);
+        if (is_union) {
+            start = 0;
+        } else if (!width) {
+            // closes the open unit (one of another size is closed already)
+            start = l->unit_bits ? l->unit_end : l->bit;
+            l->unit_bits = 0;
+        } else if (l->unit_bits && l->bit + width <= l->unit_end) {
+            start = l->bit;
+        } else {
+            l->unit_end = start + unit;
+            l->unit_bits = unit;
+        }
+        if (is_union || !l->unit_bits) place = start / 8;
+        else place = (l->unit_end - unit) / 8;
+    } else if (f->bits) {
+        // a bit-field goes on where the last one ended, if it still fits in the same unit
+        width = strtol(f->bits, NULL, 0);
+        start = is_union ? 0 : l->bit;
+        if (!width || start / unit != (start + width - 1) / unit)
+            start = (start + unit - 1) / unit * unit;
+        place = start / unit * field_size;
+    }
+    if (!is_union) l->bit = start + width;
+    // a bit-field by Microsoft's rule takes all of its unit
+    *end = start + width;
+    if (os_ms_bitfields && f->bits) {
+        if (is_union) *end = unit;
+        else if (l->unit_bits) *end = l->unit_end;
+    }
+    return place;
 }
 
 static long ct_size(Ctx* c, Token at, Type* type) {
@@ -563,7 +863,8 @@ static char ct_gaps[CT_STACK / 8];
 
 // Makes room on the stack for a value, cleared, and returns where it is.
 static long ct_room(Ctx* c, Token at, long bytes) {
-    long place = ct_top, taken = bytes ? (bytes + 7) / 8 * 8 : 8;
+    long place = ct_top;
+    long taken = bytes ? (bytes + 7) / 8 * 8 : 8;
     if (place + taken + 8 > CT_STACK) FAIL(c, at, "the compile-time values here take more than %d bytes", CT_STACK);
     ct_top += taken + 8;
     memset(ct_at(place), 0, (size_t)taken);
@@ -580,9 +881,12 @@ static int ct_reads(Ctx* c, Token at, void* address, long size) {
     // A member or element of what a null pointer points to is a little past
     // null; no compile-time value is ever that low in memory
     if ((uintptr_t)p < CT_NULL_REACH) FAIL(c, at, "a null pointer is dereferenced at compile time");
-    for (long word = (p - ct_at(0)) / 8; p >= ct_at(0) && p + size <= ct_at(CT_STACK); word++) {
-        if (word * 8 >= p - ct_at(0) + (size ? size : 1)) return 1;
-        if (ct_gaps[word]) FAIL(c, at, "a pointer is dereferenced at compile time outside the value it points into");
+    if (p >= ct_at(0) && p + size <= ct_at(CT_STACK)) {
+        // on the stack: none of the words it covers may be a gap between two values
+        long end = p - ct_at(0) + (size ? size : 1);
+        for (long word = (p - ct_at(0)) / 8; word * 8 < end; word++)
+            if (ct_gaps[word]) FAIL(c, at, "a pointer is dereferenced at compile time outside the value it points into");
+        return 1;
     }
     for (size_t i = 0; i < ct_kept.len; i += 2)
         if (p >= (char*)ct_kept.items[i] && p + size <= (char*)ct_kept.items[i] + (size_t)ct_kept.items[i + 1]) return 1;
@@ -622,53 +926,87 @@ static const char* ct_quoted(const char* s) {
     return buf_str(&b);
 }
 
+// The suffix of a literal of a builtin type, where C has one
+static const char* const ct_suffix[BK_COUNT] = {
+    [BK_UINT] = "U", [BK_LONG] = "L", [BK_ULONG] = "UL", [BK_LLONG] = "LL", [BK_ULLONG] = "ULL", [BK_FLOAT] = "f",
+};
+
 // Writes the value at an address as Typed C, so that ordinary code can have
 // it. With `braces` it initializes a variable, where a struct or an array is
 // a list in braces. Elsewhere a struct is a compound literal, and an array
 // cannot stand.
 static const char* ct_text(Ctx* c, Token at, Type* type, void* address, int braces) {
-    static const char* const suffix[BK_COUNT] = {
-        [BK_UINT] = "U", [BK_LONG] = "L", [BK_ULONG] = "UL", [BK_LLONG] = "LL", [BK_ULLONG] = "ULL", [BK_FLOAT] = "f",
-    };
     Type* named = type_unq(type);
     Type* k = type_canon(named);
     int kind = ct_kind(k);
     Word value = kind ? ct_load(address, kind) : 0;
+    if (kind & CT_FLOAT) return ct_text_float(k, value);
+    if (k->kind == TY_PTR) return ct_text_pointer(c, at, k, value);
+    if (k->kind == TY_ENUM) return ct_text_enum(c, at, named, k, value);
+    if (kind) return ct_text_integer(named, k, kind, value);
+    if (ct_complex(k)) return ct_text_complex(c, at, k, address);
+    return ct_text_list(c, at, named, k, address, braces);
+}
+
+// The shortest spelling that reads back as the same number
+static const char* ct_text_float(Type* k, Word value) {
+    double d = ct_double(value);
+    if (d != d || d - d != 0) {
+        // An infinity or a NaN has no literal: it is INFINITY or NAN of <math.h>
+        // (emit.h includes it), a float, cast to the type it has here
+        const char* sign = (UWord)value >> 63 ? "-" : "";
+        const char* name = d != d ? "NAN" : "INFINITY";
+        ct_math_written = 1;
+        if (k->builtin == BK_FLOAT) return xstrf("%s%s", sign, name);
+        return xstrf("(%s)%s%s", builtin_names[k->builtin], sign, name);
+    }
+    const char* text = "";
+    for (int digits = 6; digits <= 17; digits++) {
+        text = xstrf("%.*g", digits, ct_double(value));
+        if (strtod(text, NULL) == ct_double(value)) break;
+    }
+    const char* point = strpbrk(text, ".en") ? "" : ".0";      // a whole number still reads as a floating one
+    const char* suffix = ct_suffix[k->builtin] ? ct_suffix[k->builtin] : "";
+    return xstrf("%s%s%s", text, point, suffix);
+}
+
+// A pointer: null, or a string; a pointer to anything else in compile-time
+// memory has no runtime form
+static const char* ct_text_pointer(Ctx* c, Token at, Type* k, Word value) {
+    Type* to = type_canon(k->base);
+    if (ct_is_type(k)) FAIL(c, at, "a type is a compile-time value only: it has no runtime form");
+    if (!value) return "0";
+    int is_char = to->kind == TY_BUILTIN && to->builtin >= BK_CHAR && to->builtin <= BK_UCHAR;
+    if (is_char && ct_reads(c, at, (void*)(intptr_t)value, 1))
+        return xstrf("\"%s\"", ct_quoted((const char*)(intptr_t)value));
+    FAIL(c, at, "a pointer to compile-time memory has no runtime form, so it cannot be used in ordinary code");
+}
+
+// An enumerator, if one has this value, else the number cast to the enum
+static const char* ct_text_enum(Ctx* c, Token at, Type* named, Type* k, Word value) {
+    Type* e = type_unq(k);
+    struct_resolve(e);
+    long long has;
+    for (int i = 0; i < e->nfields; i++)
+        if (e->fields[i].name && enum_value(e, e->fields[i].name, &has) && has == value)
+            return gen_enum_const(c, e, token_synth(e->fields[i].name, TK_IDENT, at)).s;
+    return xstrf("(%s)%lld", type_decl(named, NULL, NULL, 0), (long long)value);
+}
+
+// Plainly for an int or anything narrower, with a suffix where C has one, and
+// with a cast otherwise
+static const char* ct_text_integer(Type* named, Type* k, int kind, Word value) {
+    int wide = k->builtin > BK_INT;
+    const char* text = kind & CT_UNSIGNED ? xstrf("%llu", (unsigned long long)value) : xstrf("%lld", (long long)value);
+    if (!wide) return text;
+    if (named->kind == TY_BUILTIN && *text != '-') return xstrf("%s%s", text, ct_suffix[k->builtin]);
+    return xstrf("(%s)%s", type_decl(named, NULL, NULL, 0), text);
+}
+
+// A struct or an array: a list in braces, which is a compound literal where
+// it does not initialize a variable
+static const char* ct_text_list(Ctx* c, Token at, Type* named, Type* k, void* address, int braces) {
     Buf b = {0};
-    if (kind & CT_FLOAT) {
-        // the shortest spelling that reads back as the same number
-        const char* text = "";
-        for (int digits = 6; digits <= 17; digits++) {
-            text = xstrf("%.*g", digits, ct_double(value));
-            if (strtod(text, NULL) == ct_double(value)) break;
-        }
-        return xstrf("%s%s%s", text, strpbrk(text, ".en") ? "" : ".0", suffix[k->builtin] ? suffix[k->builtin] : "");
-    }
-    if (k->kind == TY_PTR) {
-        Type* to = type_canon(k->base);
-        if (ct_is_type(k)) FAIL(c, at, "a type is a compile-time value only: it has no runtime form");
-        if (!value) return "0";
-        if (to->kind == TY_BUILTIN && to->builtin >= BK_CHAR && to->builtin <= BK_UCHAR && ct_reads(c, at, (void*)(intptr_t)value, 1))
-            return xstrf("\"%s\"", ct_quoted((const char*)(intptr_t)value));
-        FAIL(c, at, "a pointer to compile-time memory has no runtime form, so it cannot be used in ordinary code");
-    }
-    if (k->kind == TY_ENUM) {
-        // an enumerator, if one has this value
-        Type* e = type_unq(k);
-        struct_resolve(e);
-        long long has;
-        for (int i = 0; i < e->nfields; i++)
-            if (e->fields[i].name && enum_value(e, e->fields[i].name, &has) && has == value)
-                return gen_enum_const(c, e, token_synth(e->fields[i].name, TK_IDENT, at)).s;
-        return xstrf("(%s)%lld", type_decl(named, NULL, NULL, 0), (long long)value);
-    }
-    if (kind) {
-        // plainly for an int or anything narrower, with a suffix where C has one, and with a cast otherwise
-        int wide = k->builtin > BK_INT;
-        const char* text = kind & CT_UNSIGNED ? xstrf("%llu", (unsigned long long)value) : xstrf("%lld", (long long)value);
-        if (wide && named->kind == TY_BUILTIN && *text != '-') return xstrf("%s%s", text, suffix[k->builtin]);
-        return wide ? xstrf("(%s)%s", type_decl(named, NULL, NULL, 0), text) : text;
-    }
     buf_putc(&b, '{');
     if (k->kind == TY_ARRAY) {
         long step = ct_size(c, at, k->base);
@@ -693,17 +1031,96 @@ static const char* ct_text(Ctx* c, Token at, Type* type, void* address, int brac
     return xstrf("(%s)%s", type_decl(named, NULL, NULL, 0), buf_str(&b));
 }
 
+// A complex number, as CMPLXF, CMPLX or CMPLXL of <complex.h> makes it, which
+// the generated C includes then (emit.h)
+static const char* ct_text_complex(Ctx* c, Token at, Type* k, void* address) {
+    static const char* const make[] = { "CMPLXF", "CMPLX", "CMPLXL" };
+    Type* real = ct_complex_real(k);
+    long part = ct_kind(real) & 15;
+    const char* re = ct_text(c, at, real, address, 1);
+    const char* im = ct_text(c, at, real, (char*)address + part, 1);
+    ct_complex_written = 1;
+    return xstrf("%s(%s, %s)", make[k->builtin - BK_CFLOAT], re, im);
+}
+
+// A complex number is held as two numbers of its real type, the real part
+// first, as C lays it out, and its value is their address. Reads the parts.
+static void ct_complex_parts(Ctx* c, Token at, CtValue value, double* re, double* im) {
+    int kind = ct_kind(ct_complex_real(value.type));
+    char* address = (char*)(intptr_t)value.v;
+    *re = 0;
+    *im = 0;
+    if (!ct_reads(c, at, address, 2 * (kind & 15))) return;
+    *re = ct_double(ct_load(address, kind));
+    *im = ct_double(ct_load(address + (kind & 15), kind));
+}
+
+// Makes a complex number on the stack. Each part is rounded to the real type.
+static CtValue ct_complex_make(Ctx* c, Token at, Type* type, double re, double im) {
+    int kind = ct_kind(ct_complex_real(type));
+    if (ct_dry) return (CtValue){ type_unq(type), 0 };
+    char* address = ct_at(ct_room(c, at, 2 * (kind & 15)));
+    ct_store(address, kind, ct_bits(re));
+    ct_store(address + (kind & 15), kind, ct_bits(im));
+    return (CtValue){ type_unq(type), (Word)(intptr_t)address };
+}
+
 // ---------------------------------------------------------------------------
 // Evaluating expressions
 // ---------------------------------------------------------------------------
 
-static CtValue ct_eval(Ctx* c, Expr* e);
-static CtValue ct_call(Ctx* c, Expr* call);
-static CtValue ct_value(Ctx* c, Expr* e);
+static Local* ct_local(Ctx* c, Token name);
+static Module* ct_space(Ctx* c, Expr* e, Token* name);
+static CtGlobal* ct_global(Ctx* c, Expr* e);
+static Type* ct_enumerator(Ctx* c, Expr* e, long long* value);
+static int ct_at_call(Ctx* c, Expr* call);
+static int ct_assigns(Expr* e);
 static int ct_known(Ctx* c, Expr* e);
-static Expr* ct_named(Ctx* c, Expr* e);
+static int ct_known_name(Ctx* c, Expr* e, Token op);
+static Type* ct_common(Type* a, Type* b);
+static Word ct_convert(Ctx* c, Token at, CtValue from, Type* to);
+static CtValue ct_to_complex(Ctx* c, Token at, CtValue from, Type* to);
+static long long ct_char_value(Token tok);
+static const char* ct_string(Token tok);
+static void ct_global_value(Ctx* c, Token at, CtGlobal* g);
+static int ct_shift_count(Ctx* c, Token at, Type* type, Word count);
+static Word ct_operate(Ctx* c, Token at, const char* op, Type* type, Word a, Word b);
+static Word ct_operate_float(Ctx* c, Token at, const char* op, Type* type, Word a, Word b);
+static Word ct_operate_integer(Ctx* c, Token at, const char* op, Type* type, Word a, Word b);
+static int ct_less(Word a, Word b, int is_unsigned, int equal);
+static CtValue ct_arith(Ctx* c, Token at, const char* op, CtValue left, CtValue right);
+static CtValue ct_arith_complex(Ctx* c, Token at, const char* op, CtValue left, CtValue right);
+static Type* ct_complex_common(Ctx* c, Token at, const char* op, Type* a, Type* b);
+static void ct_complex_operate(Type* type, char op, double ar, double ai, double br, double bi, double* rr, double* ri);
+static CtValue ct_read(Ctx* c, Token at, char* address, Type* type);
+static CtValue ct_assign(Ctx* c, Token at, char* address, Type* type, CtValue value);
+static void ct_changing(Ctx* c, Expr* e);
+static int ct_is_place(Expr* e);
+static char* ct_place(Ctx* c, Expr* e, Type** type);
+static char* ct_place_member(Ctx* c, Expr* e, Type** type);
+static char* ct_place_element(Ctx* c, Expr* e, Type** type);
+static char* ct_place_variable(Ctx* c, Expr* e, Type** type);
+static CtValue ct_eval(Ctx* c, Expr* e);
+static CtValue ct_eval_named(Ctx* c, Expr* e);
+static CtValue ct_eval_literal(Ctx* c, Token op);
+static CtValue ct_eval_compound(Ctx* c, Expr* e);
+static CtValue ct_eval_ternary(Ctx* c, Expr* e);
+static CtValue ct_eval_unary(Ctx* c, Expr* e);
+static CtValue ct_eval_unary_complex(Ctx* c, Token op, CtValue operand);
+static CtValue ct_eval_increment(Ctx* c, Expr* e);
+static CtValue ct_eval_binary(Ctx* c, Expr* e);
+static CtValue ct_eval_assignment(Ctx* c, Expr* e);
+static CtValue ct_eval_logical(Ctx* c, Expr* e, CtValue left);
 static void ct_init(Ctx* c, char* address, Type* type, Expr* e);
+static void ct_init_list(Ctx* c, char* address, Type* type, Expr* e, long size);
+static void ct_init_braced(Ctx* c, char* address, Type* type, Expr* e);
 static Type* ct_declared(Ctx* c, Expr* d);
+
+// From the sections below
+static CtValue ct_call(Ctx* c, Expr* call);
+static int ct_complex_function(Ctx* c, Expr* callee);
+static CtValue ct_value(Ctx* c, Expr* e);
+static Expr* ct_named(Ctx* c, Expr* e);
 static Token ct_field_member(Ctx* c, Expr* e);
 static Word ct_field_kind(Type* type);
 static int ct_implements(Ctx* c, Token at, Type* type, Expr* bound);
@@ -711,9 +1128,9 @@ static void ct_start(SrcFile* f, Expr* start);
 static void ct_function(SrcFile* f, Expr* def);
 static SrcFile* ct_function_file(SrcFile* f, Func* fn);
 static int ct_controlled(Expr* owner);
-static List ct_controls;        // hand-written impls and traits with control among their members: the item, then its file
 static void ct_emit(Ctx* c, Expr* s);
 static void ct_unresolve(void);
+static List ct_controls;        // hand-written impls and traits with control among their members: the item, then its file
 static List ct_types;           // compile-time types that files declare: the declaration, then its file
 static List ct_resolving;       // the types whose members were being resolved by something that may not get through
 static int ct_quiet;            // a function body is being tried: what it misses may still be emitted
@@ -730,8 +1147,12 @@ static Local* ct_local(Ctx* c, Token name) {
 // receives the name itself. A local variable of that name hides whatever a
 // namespace has, so then there is no namespace to look in.
 static Module* ct_space(Ctx* c, Expr* e, Token* name) {
-    *name = e->kind == E_PATH ? e->blockstmt[e->blockstmt_size - 1]->token : e->token;
-    if (e->kind == E_PATH) return e->blockstmt_size == 2 ? import_find(c->file, tok_str(e->blockstmt[0]->token)) : NULL;
+    if (e->kind == E_PATH) {
+        *name = e->blockstmt[e->blockstmt_size - 1]->token;
+        if (e->blockstmt_size != 2) return NULL;
+        return import_find(c->file, tok_str(e->blockstmt[0]->token));
+    }
+    *name = e->token;
     if (e->kind != E_IDENT || name->kind != TK_IDENT) return NULL;
     return local_find(c, L_VAR | L_ENUMCONST, tok_str(*name)) ? NULL : c->file->mod;
 }
@@ -785,23 +1206,19 @@ static int ct_assigns(Expr* e) {
 //   1  it consists of literals and enumerators only, so it is left as it was written
 //   2  it uses compile-time values, so it is evaluated and replaced by its result
 static int ct_known(Ctx* c, Expr* e) {
-    Token op = e->token;
-    int a, b = 1, d = 1;
-    long long value;
+    Token op = e->token;    // as written: ct_named may stand a resolved @ident(...) in for it
+    int a;
+    int b = 1;
+    int d = 1;
     e = ct_named(c, e);
     switch (e->kind) {
         case E_COND: case E_CAST:
             return ct_known(c, e->left);
-        case E_IDENT:
-            if (op.kind != TK_IDENT) return op.kind == TK_CHAR || op.kind == TK_NUM || op.kind == TK_PP_NUM || op.kind == TK_STR;
-            if (*op.start == '@' && !ct_spliced(op)) FAIL(c, op, "'%s' is an '@' function: it can only be called, and has no address", tok_str(op));
-            if (ct_local(c, op) || ct_global(c, e)) return 2;
-            if (ct_enumerator(c, e, &value)) return 1;
-            // a constant generic argument is a compile-time value
-            return !ct_spliced(op) && const_binding(c, tok_str(op)) && const_binding(c, tok_str(op))->has_value ? 2 : 0;
-        case E_PATH:
-            return ct_global(c, e) ? 2 : ct_enumerator(c, e, &value) ? 1 : 0;
+        case E_IDENT: case E_PATH:
+            return ct_known_name(c, e, op);
         case E_CALL:
+            // creal, cimag and conj are compile-time values for one
+            if (ct_complex_function(c, e->right) >= 0) return e->left && e->left->left ? ct_known(c, e->left->left) : 0;
             if (!ct_at_call(c, e)) return 0;
             for (Expr* arg = e->left; arg; arg = arg->right)
                 if (arg->left && !ct_known(c, arg->left))
@@ -838,6 +1255,24 @@ static int ct_known(Ctx* c, Expr* e) {
     return a == 2 || b == 2 || d == 2 ? 2 : 1;
 }
 
+// ct_known for a name or a literal, which is `op` as it was written
+static int ct_known_name(Ctx* c, Expr* e, Token op) {
+    long long value;
+    if (e->kind == E_PATH) {
+        if (ct_global(c, e)) return 2;
+        return ct_enumerator(c, e, &value) ? 1 : 0;
+    }
+    if (op.kind != TK_IDENT) return op.kind == TK_CHAR || op.kind == TK_NUM || op.kind == TK_PP_NUM || op.kind == TK_STR;
+    if (*op.start == '@' && !ct_spliced(op))
+        FAIL(c, op, "'%s' is an '@' function: it can only be called, and has no address", tok_str(op));
+    if (ct_local(c, op) || ct_global(c, e)) return 2;
+    if (ct_enumerator(c, e, &value)) return 1;
+    // a constant generic argument is a compile-time value
+    if (ct_spliced(op)) return 0;
+    Type* constant = const_binding(c, tok_str(op));
+    return constant && constant->has_value ? 2 : 0;
+}
+
 // Returns the type that arithmetic on two numbers is done in.
 static Type* ct_common(Type* a, Type* b) {
     Type* common = arith_type(a, b);
@@ -848,13 +1283,48 @@ static Type* ct_common(Type* a, Type* b) {
 // or a cast makes it. A struct stays as it is, and an array becomes the
 // address of its first element, which is what its value already is.
 static Word ct_convert(Ctx* c, Token at, CtValue from, Type* to) {
-    int have = ct_kind(from.type), want = ct_kind(to);
-    if (ct_is_type(from.type) && want && !ct_is_type(to) && !(want & CT_TRUTH)) FAIL(c, at, "a type cannot become a value of type '%s'", type_show(to));
+    if (ct_complex(to)) return ct_to_complex(c, at, from, to).v;
+    int have = ct_kind(from.type);
+    int want = ct_kind(to);
+    if (ct_complex(from.type) && want) {
+        double re;
+        double im;
+        if (ct_pointee(to)) FAIL(c, at, "a complex number cannot become a value of type '%s'", type_show(to));
+        ct_complex_parts(c, at, from, &re, &im);
+        // a _Bool is whether either part is not zero, and anything else is the real part
+        if (want & CT_TRUTH) return re != 0 || im != 0;
+        from = (CtValue){ ct_complex_real(from.type), ct_bits(re) };
+        have = ct_kind(from.type);
+    }
+    if (ct_is_type(from.type) && want && !ct_is_type(to) && !(want & CT_TRUTH))
+        FAIL(c, at, "a type cannot become a value of type '%s'", type_show(to));
     if (!want || type_canon(from.type)->kind == TY_ARRAY) return from.v;
     if (!have) FAIL(c, at, "a value of type '%s' is needed here, and this is of type '%s'", type_show(to), type_show(from.type));
-    if ((want & CT_FLOAT) && !(have & CT_FLOAT)) from.v = ct_bits(have & CT_UNSIGNED ? (double)(UWord)from.v : (double)from.v);
+    if ((want & CT_FLOAT) && !(have & CT_FLOAT)) {
+        double d = have & CT_UNSIGNED ? (double)(UWord)from.v : (double)from.v;
+        from.v = ct_bits(d);
+    }
     if (!(want & CT_FLOAT) && (have & CT_FLOAT)) from.v = (Word)ct_double(from.v);
     return ct_fit(from.v, want);
+}
+
+// Returns a value as a complex number of a type: a real number is its real
+// part, and a complex number of another type has its parts converted
+static CtValue ct_to_complex(Ctx* c, Token at, CtValue from, Type* to) {
+    int have = ct_kind(from.type);
+    double re = 0;
+    double im = 0;
+    if (ct_complex(from.type) && type_canon(from.type) == type_canon(to)) return (CtValue){ type_unq(to), from.v };
+    if (ct_complex(from.type)) {
+        ct_complex_parts(c, at, from, &re, &im);
+    } else if (have && !ct_pointee(from.type)) {
+        if (have & CT_FLOAT) re = ct_double(from.v);
+        else if (have & CT_UNSIGNED) re = (double)(UWord)from.v;
+        else re = (double)from.v;
+    } else {
+        FAIL(c, at, "a value of type '%s' is needed here, and this is of type '%s'", type_show(to), type_show(from.type));
+    }
+    return ct_complex_make(c, at, to, re, im);
 }
 
 static long long ct_char_value(Token tok) {
@@ -922,20 +1392,42 @@ static int ct_shift_count(Ctx* c, Token at, Type* type, Word count) {
 
 // Applies a binary operator to two numbers of the same type.
 static Word ct_operate(Ctx* c, Token at, const char* op, Type* type, Word a, Word b) {
-    int kind = ct_kind(type), is_unsigned = kind & CT_UNSIGNED, twice = op[1] == op[0], equal = op[1] == '=';
-    UWord ua = (UWord)a, ub = (UWord)b;
-    double fa = ct_double(a), fb = ct_double(b);
     if (ct_dry) return 0;
-    if (kind & CT_FLOAT) switch (*op) {
+    if (ct_kind(type) & CT_FLOAT) return ct_operate_float(c, at, op, type, a, b);
+    return ct_operate_integer(c, at, op, type, a, b);
+}
+
+// ct_operate for floating-point numbers, which are in words as the bits of a double
+static Word ct_operate_float(Ctx* c, Token at, const char* op, Type* type, Word a, Word b) {
+    double fa = ct_double(a);
+    double fb = ct_double(b);
+    int twice = op[1] == op[0];
+    int equal = op[1] == '=';
+    switch (*op) {
         case '+': return ct_bits(fa + fb);
         case '-': return ct_bits(fa - fb);
         case '*': return ct_bits(fa * fb);
         case '/': return ct_bits(fa / fb);
         case '=': return fa == fb;
         case '!': return fa != fb;
-        case '<': if (!twice) return equal ? fa <= fb : fa < fb; break;
-        case '>': if (!twice) return equal ? fa >= fb : fa > fb; break;
-    } else switch (*op) {
+        case '<':
+            if (twice) break;   // no shift of a floating-point number
+            return equal ? fa <= fb : fa < fb;
+        case '>':
+            if (twice) break;
+            return equal ? fa >= fb : fa > fb;
+    }
+    FAIL(c, at, "operator '%s' cannot be applied to a value of type '%s' at compile time", op, type_show(type));
+}
+
+// ct_operate for integers and pointers
+static Word ct_operate_integer(Ctx* c, Token at, const char* op, Type* type, Word a, Word b) {
+    int is_unsigned = ct_kind(type) & CT_UNSIGNED;
+    int twice = op[1] == op[0];
+    int equal = op[1] == '=';
+    UWord ua = (UWord)a;
+    UWord ub = (UWord)b;
+    switch (*op) {
         case '|': return a | b;
         case '^': return a ^ b;
         case '&': return a & b;
@@ -951,15 +1443,21 @@ static Word ct_operate(Ctx* c, Token at, const char* op, Type* type, Word a, Wor
             return *op == '/' ? a / b : a % b;
         case '<':
             if (twice) return (Word)(ua << ct_shift_count(c, at, type, b));
-            return is_unsigned ? (equal ? ua <= ub : ua < ub) : (equal ? a <= b : a < b);
+            return ct_less(a, b, is_unsigned, equal);
         case '>':
             if (twice) {
                 int count = ct_shift_count(c, at, type, b);
                 return is_unsigned ? (Word)(ua >> count) : a >> count;
             }
-            return is_unsigned ? (equal ? ua >= ub : ua > ub) : (equal ? a >= b : a > b);
+            return ct_less(b, a, is_unsigned, equal);    // a > b is b < a
     }
     FAIL(c, at, "operator '%s' cannot be applied to a value of type '%s' at compile time", op, type_show(type));
+}
+
+// a < b, or a <= b with `equal`, as signed or as unsigned numbers
+static int ct_less(Word a, Word b, int is_unsigned, int equal) {
+    if (is_unsigned) return equal ? (UWord)a <= (UWord)b : (UWord)a < (UWord)b;
+    return equal ? a <= b : a < b;
 }
 
 // Applies a binary operator to two values. Numbers are brought to the type
@@ -971,7 +1469,9 @@ static CtValue ct_arith(Ctx* c, Token at, const char* op, CtValue left, CtValue 
     Type* rp = ct_pointee(right.type);
     int shift = (*op == '<' || *op == '>') && op[1] == op[0];
     int compares = !shift && strchr("=!<>", op[0]) && (op[1] == '=' || !op[1]);
-    int plus = strcmp(op, "+") == 0, minus = strcmp(op, "-") == 0;
+    int plus = strcmp(op, "+") == 0;
+    int minus = strcmp(op, "-") == 0;
+    if (ct_complex(left.type) || ct_complex(right.type)) return ct_arith_complex(c, at, op, left, right);
     if (lp || rp) {
         Type* pointer = type_ptr(lp ? lp : rp);
         long step = ct_size(c, at, lp ? lp : rp);
@@ -992,6 +1492,82 @@ static CtValue ct_arith(Ctx* c, Token at, const char* op, CtValue left, CtValue 
     return compares ? (CtValue){ truth, result } : (CtValue){ type, ct_fit(result, ct_kind(type)) };
 }
 
+// An operator with a complex operand: both are brought to the complex type
+// they share. C has no order of complex numbers, and no bitwise operators,
+// shifts or remainder for them.
+static CtValue ct_arith_complex(Ctx* c, Token at, const char* op, CtValue left, CtValue right) {
+    static const char* const allowed[] = { "+", "-", "*", "/", "==", "!=" };
+    int known = 0;
+    for (size_t i = 0; i < sizeof allowed / sizeof *allowed; i++)
+        known |= strcmp(op, allowed[i]) == 0;
+    if (!known) FAIL(c, at, "operator '%s' cannot be applied to a complex number", op);
+    Type* type = ct_complex_common(c, at, op, left.type, right.type);
+    double ar;
+    double ai;
+    double br;
+    double bi;
+    ct_complex_parts(c, at, ct_to_complex(c, at, left, type), &ar, &ai);
+    ct_complex_parts(c, at, ct_to_complex(c, at, right, type), &br, &bi);
+    if (op[1] == '=') {
+        int equal = ar == br && ai == bi;
+        return (CtValue){ type_builtin(BK_INT), *op == '=' ? equal : !equal };
+    }
+    double rr = 0;
+    double ri = 0;
+    if (*op == '+') {
+        rr = ar + br;
+        ri = ai + bi;
+    } else if (*op == '-') {
+        rr = ar - br;
+        ri = ai - bi;
+    } else {
+        ct_complex_operate(type, *op, ar, ai, br, bi, &rr, &ri);
+    }
+    return ct_complex_make(c, at, type, rr, ri);
+}
+
+// The type that two operands are brought to when one is complex: complex, of
+// the real type that their real types share
+static Type* ct_complex_common(Ctx* c, Token at, const char* op, Type* a, Type* b) {
+    Type* ra = ct_complex(a) ? ct_complex_real(a) : a;
+    Type* rb = ct_complex(b) ? ct_complex_real(b) : b;
+    if (!ct_kind(ra) || !ct_kind(rb) || ct_pointee(ra) || ct_pointee(rb))
+        FAIL(c, at, "operator '%s' cannot be applied to a value of type '%s' at compile time", op, type_show(ct_complex(a) ? b : a));
+    return ct_complex_of(ct_common(ra, rb));
+}
+
+// Multiplies or divides two complex numbers as the C compiler does, which
+// takes care of infinities as C's Annex G has it: with the compiler that
+// typedc is built with, in the precision of the type
+static void ct_complex_operate(Type* type, char op, double ar, double ai, double br, double bi, double* rr, double* ri) {
+    if (type_canon(type)->builtin == BK_CFLOAT) {
+        float a_parts[2] = { (float)ar, (float)ai };
+        float b_parts[2] = { (float)br, (float)bi };
+        float r_parts[2];
+        float _Complex a;
+        float _Complex b;
+        memcpy(&a, a_parts, sizeof a);
+        memcpy(&b, b_parts, sizeof b);
+        float _Complex r = op == '*' ? a * b : a / b;
+        memcpy(r_parts, &r, sizeof r_parts);
+        *rr = r_parts[0];
+        *ri = r_parts[1];
+        return;
+    }
+    // long double _Complex is worked on as double _Complex, as long double is as double
+    double a_parts[2] = { ar, ai };
+    double b_parts[2] = { br, bi };
+    double r_parts[2];
+    double _Complex a;
+    double _Complex b;
+    memcpy(&a, a_parts, sizeof a);
+    memcpy(&b, b_parts, sizeof b);
+    double _Complex r = op == '*' ? a * b : a / b;
+    memcpy(r_parts, &r, sizeof r_parts);
+    *rr = r_parts[0];
+    *ri = r_parts[1];
+}
+
 // Returns the value that is at an address: the number that is stored there,
 // or for a struct or an array the address itself.
 static CtValue ct_read(Ctx* c, Token at, char* address, Type* type) {
@@ -1008,6 +1584,7 @@ static CtValue ct_assign(Ctx* c, Token at, char* address, Type* type, CtValue va
     long size = ct_size(c, at, type);
     Word stored = ct_convert(c, at, value, type);
     if (!kind) {
+        if (ct_complex(type)) value = (CtValue){ type, stored };     // converted to this complex type
         if (ct_kind(value.type)) FAIL(c, at, "a value of type '%s' is needed here, and this is of type '%s'", type_show(type), type_show(value.type));
         if (ct_writes(c, at, address, size) && ct_reads(c, at, (void*)(intptr_t)value.v, size))
             memmove(address, (void*)(intptr_t)value.v, (size_t)size);
@@ -1020,7 +1597,8 @@ static CtValue ct_assign(Ctx* c, Token at, char* address, Type* type, CtValue va
 // Reports a variable that ordinary code changes inside a branch or loop that
 // is decided at runtime, by its name.
 static void ct_changing(Ctx* c, Expr* e) {
-    Local* l = e->kind == E_IDENT && e->token.kind == TK_IDENT && !ct_spliced(e->token) ? ct_local(c, e->token) : NULL;
+    if (e->kind != E_IDENT || e->token.kind != TK_IDENT || ct_spliced(e->token)) return;
+    Local* l = ct_local(c, e->token);
     if (l && !g_ct.running && l->at >= ct_at(0) && l->at < ct_at(g_ct.floor))
         FAIL(c, e->token, "compile-time variable '%s' cannot change inside a branch or loop that is decided at runtime", l->name);
 }
@@ -1029,62 +1607,80 @@ static void ct_changing(Ctx* c, Expr* e) {
 // an element, or what a pointer points to.
 static int ct_is_place(Expr* e) {
     while (e->kind == E_COND) e = e->left;
-    return (e->kind == E_IDENT && e->token.kind == TK_IDENT) || e->kind == E_PATH || e->kind == E_MEMBER || e->kind == E_INDEX ||
-           (e->kind == E_UNARY && token_is(e->token, "*"));
+    if (e->kind == E_IDENT) return e->token.kind == TK_IDENT;
+    if (e->kind == E_UNARY) return token_is(e->token, "*");
+    return e->kind == E_PATH || e->kind == E_MEMBER || e->kind == E_INDEX;
 }
 
 // Returns the address of a place, and `type` receives the type of what is there.
 static char* ct_place(Ctx* c, Expr* e, Type** type) {
     while (e->kind == E_COND) e = e->left;
     e = ct_named(c, e);
-    Token op = e->token;
-    if (e->kind == E_MEMBER) {
-        // the member of a struct, or of the struct a pointer points to
-        Type* base;
-        char* address;
-        long offset = 0;
-        if (token_is(op, "->")) {
-            CtValue pointer = ct_eval(c, e->left);
-            base = ct_pointee(pointer.type);
-            address = (char*)(intptr_t)pointer.v;
-        } else if (ct_is_place(e->left)) {
-            address = ct_place(c, e->left, &base);
-        } else {
-            CtValue value = ct_eval(c, e->left);
-            base = value.type;
-            address = (char*)(intptr_t)value.v;
-        }
-        if (!base || type_canon(base)->kind != TY_STRUCT) FAIL(c, e->name, "'%s%s' needs a struct on its left", tok_str(op), tok_str(e->name));
-        *type = NULL;
-        ct_layout(c, e->name, base, NULL, tok_str(e->name), &offset, type);
-        if (!*type) FAIL(c, e->name, "type '%s' has no member '%s'", type_show(base), tok_str(e->name));
-        if (ct_bit_field) FAIL(c, e->name, "bit-field '%s' cannot be read or changed at compile time", tok_str(e->name));
-        // Worked out as a number: the address may be null, as in the offsetof
-        // idiom `&((T*)0)->member`. Only reading or writing there fails (ct_reads).
-        return (char*)((uintptr_t)address + (uintptr_t)offset);
-    }
-    if (e->kind == E_INDEX) {
-        // an array is where its first element is, and a pointer holds the address of one
-        CtValue base = ct_eval(c, e->right);
-        Type* k = type_canon(base.type);
-        Word index = ct_convert(c, op, ct_eval(c, e->left), g_ptrdiff_t);
-        if (!(*type = ct_pointee(base.type))) FAIL(c, op, "a value of type '%s' cannot be indexed", type_show(base.type));
-        if (k->kind == TY_ARRAY && k->has_size_value && !ct_dry && (index < 0 || index >= k->size_value))
-            FAIL(c, op, "index %lld is outside an array of %lld", (long long)index, (long long)k->size_value);
-        // likewise worked out as a number, for any pointer
-        return (char*)((uintptr_t)base.v + (uintptr_t)(index * ct_size(c, op, *type)));
-    }
-    if (e->kind == E_UNARY) {
+    if (e->kind == E_MEMBER) return ct_place_member(c, e, type);
+    if (e->kind == E_INDEX) return ct_place_element(c, e, type);
+    if (e->kind == E_UNARY && token_is(e->token, "*")) {
         CtValue pointer = ct_eval(c, e->left);
-        if (!(*type = ct_pointee(pointer.type))) FAIL(c, op, "only a pointer can be dereferenced");
+        *type = ct_pointee(pointer.type);
+        if (!*type) FAIL(c, e->token, "only a pointer can be dereferenced");
         return (char*)(intptr_t)pointer.v;
     }
+    if (e->kind == E_PATH || (e->kind == E_IDENT && e->token.kind == TK_IDENT)) return ct_place_variable(c, e, type);
+    // a number, a call, an operation: a value that is not stored anywhere
+    if (e->kind == E_IDENT) FAIL(c, e->token, "'%s' is a value that is not stored anywhere, so it has no address", tok_str(e->token));
+    FAIL(c, e->token, "this is a value that is not stored anywhere, so it has no address");
+}
+
+// The member of a struct, or of the struct a pointer points to
+static char* ct_place_member(Ctx* c, Expr* e, Type** type) {
+    Token op = e->token;
+    Type* base;
+    char* address;
+    long offset = 0;
+    if (token_is(op, "->")) {
+        CtValue pointer = ct_eval(c, e->left);
+        base = ct_pointee(pointer.type);
+        address = (char*)(intptr_t)pointer.v;
+    } else if (ct_is_place(e->left)) {
+        address = ct_place(c, e->left, &base);
+    } else {
+        CtValue value = ct_eval(c, e->left);
+        base = value.type;
+        address = (char*)(intptr_t)value.v;
+    }
+    if (!base || type_canon(base)->kind != TY_STRUCT) FAIL(c, e->name, "'%s%s' needs a struct on its left", tok_str(op), tok_str(e->name));
+    *type = NULL;
+    ct_layout(c, e->name, base, NULL, tok_str(e->name), &offset, type);
+    if (!*type) FAIL(c, e->name, "type '%s' has no member '%s'", type_show(base), tok_str(e->name));
+    if (ct_bit_field) FAIL(c, e->name, "bit-field '%s' cannot be read or changed at compile time", tok_str(e->name));
+    // Worked out as a number: the address may be null, as in the offsetof
+    // idiom `&((T*)0)->member`. Only reading or writing there fails (ct_reads).
+    return (char*)((uintptr_t)address + (uintptr_t)offset);
+}
+
+// An element: an array is where its first element is, and a pointer holds the
+// address of one
+static char* ct_place_element(Ctx* c, Expr* e, Type** type) {
+    Token op = e->token;
+    CtValue base = ct_eval(c, e->right);
+    Type* k = type_canon(base.type);
+    Word index = ct_convert(c, op, ct_eval(c, e->left), g_ptrdiff_t);
+    *type = ct_pointee(base.type);
+    if (!*type) FAIL(c, op, "a value of type '%s' cannot be indexed", type_show(base.type));
+    if (k->kind == TY_ARRAY && k->has_size_value && !ct_dry && (index < 0 || index >= k->size_value))
+        FAIL(c, op, "index %lld is outside an array of %lld", (long long)index, (long long)k->size_value);
+    // likewise worked out as a number, for any pointer
+    return (char*)((uintptr_t)base.v + (uintptr_t)(index * ct_size(c, op, *type)));
+}
+
+// A compile-time variable, local or at file scope
+static char* ct_place_variable(Ctx* c, Expr* e, Type** type) {
+    Token op = e->token;
     Local* l = e->kind == E_IDENT ? ct_local(c, op) : NULL;
-    CtGlobal* g = l ? NULL : ct_global(c, e);
     if (l) {
         *type = l->type;
         return l->at;
     }
+    CtGlobal* g = ct_global(c, e);
     if (!g) FAIL(c, op, "a compile-time value is needed here, and '%s' is only known when the program runs", tok_str(op));
     ct_global_value(c, op, g);
     *type = g->type;
@@ -1093,117 +1689,191 @@ static char* ct_place(Ctx* c, Expr* e, Type** type) {
 
 // Evaluates a compile-time expression.
 static CtValue ct_eval(Ctx* c, Expr* e) {
-    Token op = e->token;
-    const char* text = tok_str(op);
-    size_t n = strlen(text);
-    Type* truth = type_builtin(BK_INT);
-    Type* type;
-    long long value;
     if (e->kind == E_COND) return ct_eval(c, e->left);
-    if (ct_is_place(e)) {
-        // An enumerator and a constant generic argument are numbers. Anything
-        // else that names a place is what is in that place.
-        int named = (e->kind == E_IDENT && !ct_local(c, op) && !ct_global(c, e)) || (e->kind == E_PATH && !ct_global(c, e));
-        Type* owner = named ? ct_enumerator(c, e, &value) : NULL;
-        Type* constant = named && e->kind == E_IDENT && !ct_spliced(op) ? const_binding(c, text) : NULL;
-        if (owner) return (CtValue){ owner, value };
-        if (constant && constant->has_value) return (CtValue){ constant->base, constant->value };
-        char* address = ct_place(c, e, &type);
-        return ct_read(c, op, address, type);
-    }
+    if (ct_is_place(e)) return ct_eval_named(c, e);
+    Token op = e->token;
     switch (e->kind) {
-        case E_COND:
-            return ct_eval(c, e->left);
         case E_IDENT:
-            if (op.kind == TK_STR) return (CtValue){ g_char_ptr, (Word)(intptr_t)ct_string(op) };
-            if (op.kind == TK_CHAR) return (CtValue){ truth, ct_char_value(op) };
-            type = number_type(op);
-            return (CtValue){ type, ct_kind(type) & CT_FLOAT ? ct_bits(strtod(text, NULL)) : (Word)strtoull(text, NULL, 0) };
+            return ct_eval_literal(c, op);
         case E_SIZEOF_TYPE:
             return (CtValue){ g_size_t, ct_size(c, op, resolve_type(c, e->type)) };
-        case E_CAST:
-            type = resolve_type(c, e->type);
+        case E_CAST: {
+            Type* type = resolve_type(c, e->type);
             return (CtValue){ type, ct_convert(c, op, ct_eval(c, e->left), type) };
-        case E_COMPOUND: {
-            // a value that is made where it is written, in room of its own
-            type = resolve_type(c, e->type);
-            char* address = ct_at(ct_room(c, op, ct_size(c, op, type)));
-            ct_init(c, address, type, e->left);
-            return (CtValue){ type, (Word)(intptr_t)address };
         }
+        case E_COMPOUND:
+            return ct_eval_compound(c, e);
         case E_CALL:
             return ct_call(c, e);
-        case E_TERNARY: {
-            // The result has the type the two branches share, so the branch
-            // that is not taken is still asked for its type.
-            CtValue condition = ct_eval(c, e->cases[1].condition);
-            int yes = ct_convert(c, op, condition, type_builtin(BK_BOOL)) != 0;
-            CtValue taken = ct_eval(c, e->cases[yes].block);
-            ct_dry++;
-            CtValue other = ct_eval(c, e->cases[!yes].block);
-            ct_dry--;
-            if (!ct_kind(taken.type) || !ct_kind(other.type) || ct_pointee(taken.type) || ct_pointee(other.type)) return taken;
-            type = ct_common(taken.type, other.type);
-            return (CtValue){ type, ct_convert(c, op, taken, type) };
-        }
-        case E_UNARY: case E_POSTFIX: {
-            if (token_is(op, "++") || token_is(op, "--")) {
-                // i++ yields the value i had before
-                ct_changing(c, e->left);
-                char* address = ct_place(c, e->left, &type);
-                CtValue before = ct_read(c, op, address, type);
-                if (!ct_kind(type)) FAIL(c, op, "'%s' cannot be applied to a value of type '%s'", text, type_show(type));
-                CtValue after = ct_assign(c, op, address, type, ct_arith(c, op, *text == '+' ? "+" : "-", before, (CtValue){ truth, 1 }));
-                return e->kind == E_UNARY ? after : before;
-            }
-            if (token_is(op, "&")) {
-                char* address = ct_place(c, e->left, &type);
-                return (CtValue){ type_ptr(type), (Word)(intptr_t)address };
-            }
-            if (token_kw(op, "sizeof")) {
-                // the operand is only asked for its type
-                ct_dry++;
-                type = ct_eval(c, e->left).type;
-                ct_dry--;
-                return (CtValue){ g_size_t, ct_size(c, op, type) };
-            }
-            CtValue operand = ct_eval(c, e->left);
-            int kind = ct_kind(operand.type);
-            if (!kind) FAIL(c, op, "'%s' cannot be applied to a value of type '%s'", text, type_show(operand.type));
-            if (*text == '!') return (CtValue){ truth, kind & CT_FLOAT ? ct_double(operand.v) == 0 : operand.v == 0 };
-            if (ct_pointee(operand.type)) FAIL(c, op, "'%s' cannot be applied to a value of type '%s'", text, type_show(operand.type));
-            type = ct_common(operand.type, truth);
-            CtValue promoted = { type, ct_convert(c, op, operand, type) };
-            if (*text == '+') return promoted;
-            CtValue minus_one = { type, ct_kind(type) & CT_FLOAT ? ct_bits(-1) : -1 };
-            return ct_arith(c, op, *text == '~' ? "^" : "*", promoted, minus_one);
-        }
-        case E_BINARY: {
-            if (ct_assigns(e)) {
-                ct_changing(c, e->left);
-                char* address = ct_place(c, e->left, &type);
-                if (n > 1) {
-                    CtValue before = ct_read(c, op, address, type);
-                    return ct_assign(c, op, address, type, ct_arith(c, op, xstrn(text, n - 1), before, ct_eval(c, e->right)));
-                }
-                ct_init(c, address, type, e->right);
-                return ct_read(c, op, address, type);
-            }
-            CtValue left = ct_eval(c, e->left);
-            if (*text == ',') return ct_eval(c, e->right);
-            if (strcmp(text, "&&") == 0 || strcmp(text, "||") == 0) {
-                // the right operand is only evaluated when the left one does not decide the result
-                int decided = (ct_convert(c, op, left, type_builtin(BK_BOOL)) != 0) == (*text == '|');
-                ct_dry += decided;
-                Word second = ct_convert(c, op, ct_eval(c, e->right), type_builtin(BK_BOOL));
-                ct_dry -= decided;
-                return (CtValue){ truth, decided ? *text == '|' : second };
-            }
-            return ct_arith(c, op, text, left, ct_eval(c, e->right));
-        }
+        case E_TERNARY:
+            return ct_eval_ternary(c, e);
+        case E_UNARY: case E_POSTFIX:
+            return ct_eval_unary(c, e);
+        case E_BINARY:
+            return ct_eval_binary(c, e);
         default:
             FAIL(c, op, "this cannot be carried out at compile time");
     }
+}
+
+// A name, a member, an element or what a pointer points to: what is in that
+// place. An enumerator and a constant generic argument are numbers instead.
+static CtValue ct_eval_named(Ctx* c, Expr* e) {
+    Token op = e->token;
+    int named = 0;
+    if (e->kind == E_IDENT) named = !ct_local(c, op) && !ct_global(c, e);
+    else if (e->kind == E_PATH) named = !ct_global(c, e);
+    if (named) {
+        long long value;
+        Type* owner = ct_enumerator(c, e, &value);
+        if (owner) return (CtValue){ owner, value };
+        Type* constant = e->kind == E_IDENT && !ct_spliced(op) ? const_binding(c, tok_str(op)) : NULL;
+        if (constant && constant->has_value) return (CtValue){ constant->base, constant->value };
+    }
+    Type* type;
+    char* address = ct_place(c, e, &type);
+    return ct_read(c, op, address, type);
+}
+
+// A string, a character or a number
+static CtValue ct_eval_literal(Ctx* c, Token op) {
+    if (op.kind == TK_STR) return (CtValue){ g_char_ptr, (Word)(intptr_t)ct_string(op) };
+    if (op.kind == TK_CHAR) return (CtValue){ type_builtin(BK_INT), ct_char_value(op) };
+    Type* type = number_type(op);
+    const char* text = tok_str(op);
+    if (number_imaginary(op)) {
+        if (!ct_complex(type))
+            FAIL(c, op, "'%s' is an imaginary integer, of a complex integer type that typedc does not have; a floating one is written '2.0i'", text);
+        return ct_complex_make(c, op, type, 0, strtod(text, NULL));
+    }
+    if (ct_kind(type) & CT_FLOAT) return (CtValue){ type, ct_bits(strtod(text, NULL)) };
+    return (CtValue){ type, (Word)strtoull(text, NULL, 0) };
+}
+
+// A compound literal: a value that is made where it is written, in room of its own
+static CtValue ct_eval_compound(Ctx* c, Expr* e) {
+    Token op = e->token;
+    Type* type = resolve_type(c, e->type);
+    char* address = ct_at(ct_room(c, op, ct_size(c, op, type)));
+    ct_init(c, address, type, e->left);
+    // a number is what is in the room, and a struct or an array is where it is
+    return ct_read(c, op, address, type);
+}
+
+// a ? b : c. The result has the type the two branches share, so the branch
+// that is not taken is still asked for its type.
+static CtValue ct_eval_ternary(Ctx* c, Expr* e) {
+    Token op = e->token;
+    CtValue condition = ct_eval(c, e->cases[1].condition);
+    int yes = ct_convert(c, op, condition, type_builtin(BK_BOOL)) != 0;
+    CtValue taken = ct_eval(c, e->cases[yes].block);
+    ct_dry++;
+    CtValue other = ct_eval(c, e->cases[!yes].block);
+    ct_dry--;
+    if (ct_complex(taken.type) || ct_complex(other.type))
+        return ct_to_complex(c, op, taken, ct_complex_common(c, op, "?:", taken.type, other.type));
+    if (!ct_kind(taken.type) || !ct_kind(other.type) || ct_pointee(taken.type) || ct_pointee(other.type)) return taken;
+    Type* type = ct_common(taken.type, other.type);
+    return (CtValue){ type, ct_convert(c, op, taken, type) };
+}
+
+// A unary operator: ++, --, &, sizeof, !, +, - or ~
+static CtValue ct_eval_unary(Ctx* c, Expr* e) {
+    Token op = e->token;
+    const char* text = tok_str(op);
+    Type* truth = type_builtin(BK_INT);
+    Type* type;
+    if (token_is(op, "++") || token_is(op, "--")) return ct_eval_increment(c, e);
+    if (token_is(op, "&")) {
+        char* address = ct_place(c, e->left, &type);
+        return (CtValue){ type_ptr(type), (Word)(intptr_t)address };
+    }
+    if (token_kw(op, "sizeof")) {
+        // the operand is only asked for its type
+        ct_dry++;
+        type = ct_eval(c, e->left).type;
+        ct_dry--;
+        return (CtValue){ g_size_t, ct_size(c, op, type) };
+    }
+    CtValue operand = ct_eval(c, e->left);
+    int kind = ct_kind(operand.type);
+    if (ct_complex(operand.type)) return ct_eval_unary_complex(c, op, operand);
+    if (!kind) FAIL(c, op, "'%s' cannot be applied to a value of type '%s'", text, type_show(operand.type));
+    if (*text == '!') {
+        int zero = kind & CT_FLOAT ? ct_double(operand.v) == 0 : operand.v == 0;
+        return (CtValue){ truth, zero };
+    }
+    if (ct_pointee(operand.type)) FAIL(c, op, "'%s' cannot be applied to a value of type '%s'", text, type_show(operand.type));
+    type = ct_common(operand.type, truth);
+    CtValue promoted = { type, ct_convert(c, op, operand, type) };
+    if (*text == '+') return promoted;
+    // -x is x * -1, and ~x is x ^ -1
+    CtValue minus_one = { type, ct_kind(type) & CT_FLOAT ? ct_bits(-1) : -1 };
+    return ct_arith(c, op, *text == '~' ? "^" : "*", promoted, minus_one);
+}
+
+// +, - or ! of a complex number. C has no ~ for one.
+static CtValue ct_eval_unary_complex(Ctx* c, Token op, CtValue operand) {
+    double re;
+    double im;
+    if (token_is(op, "~")) FAIL(c, op, "'~' cannot be applied to a complex number");
+    ct_complex_parts(c, op, operand, &re, &im);
+    if (token_is(op, "!")) return (CtValue){ type_builtin(BK_INT), re == 0 && im == 0 };
+    if (token_is(op, "+")) return operand;
+    return ct_complex_make(c, op, operand.type, -re, -im);
+}
+
+// ++ and --: `i++` yields the value i had before, `++i` the one it has after
+static CtValue ct_eval_increment(Ctx* c, Expr* e) {
+    Token op = e->token;
+    const char* text = tok_str(op);
+    Type* type;
+    ct_changing(c, e->left);
+    char* address = ct_place(c, e->left, &type);
+    CtValue before = ct_read(c, op, address, type);
+    if (!ct_kind(type)) FAIL(c, op, "'%s' cannot be applied to a value of type '%s'", text, type_show(type));
+    CtValue one = { type_builtin(BK_INT), 1 };
+    CtValue after = ct_assign(c, op, address, type, ct_arith(c, op, *text == '+' ? "+" : "-", before, one));
+    return e->kind == E_UNARY ? after : before;
+}
+
+// A binary operator, an assignment among them
+static CtValue ct_eval_binary(Ctx* c, Expr* e) {
+    Token op = e->token;
+    const char* text = tok_str(op);
+    if (ct_assigns(e)) return ct_eval_assignment(c, e);
+    CtValue left = ct_eval(c, e->left);
+    if (*text == ',') return ct_eval(c, e->right);
+    if (strcmp(text, "&&") == 0 || strcmp(text, "||") == 0) return ct_eval_logical(c, e, left);
+    return ct_arith(c, op, text, left, ct_eval(c, e->right));
+}
+
+// `a = b`, or `a op= b`, which is `a = a op b`
+static CtValue ct_eval_assignment(Ctx* c, Expr* e) {
+    Token op = e->token;
+    const char* text = tok_str(op);
+    size_t n = strlen(text);
+    Type* type;
+    ct_changing(c, e->left);
+    char* address = ct_place(c, e->left, &type);
+    if (n == 1) {
+        ct_init(c, address, type, e->right);
+        return ct_read(c, op, address, type);
+    }
+    CtValue before = ct_read(c, op, address, type);
+    return ct_assign(c, op, address, type, ct_arith(c, op, xstrn(text, n - 1), before, ct_eval(c, e->right)));
+}
+
+// && and ||: the right operand is only evaluated when the left one does not
+// decide the result
+static CtValue ct_eval_logical(Ctx* c, Expr* e, CtValue left) {
+    Token op = e->token;
+    int is_or = *tok_str(op) == '|';
+    int decided = (ct_convert(c, op, left, type_builtin(BK_BOOL)) != 0) == is_or;
+    ct_dry += decided;
+    Word second = ct_convert(c, op, ct_eval(c, e->right), type_builtin(BK_BOOL));
+    ct_dry -= decided;
+    return (CtValue){ type_builtin(BK_INT), decided ? is_or : second };
 }
 
 // Gives the variable at an address its first value. The value is an
@@ -1224,7 +1894,17 @@ static void ct_init(Ctx* c, char* address, Type* type, Expr* e) {
         ct_assign(c, e->token, address, type, ct_eval(c, e));
         return;
     }
-    if (k->kind != TY_STRUCT && k->kind != TY_ARRAY) FAIL(c, e->token, "a list in braces needs a struct or an array to go into");
+    ct_init_list(c, address, type, e, size);
+}
+
+// A list in braces: a value for each element, or for each member in order or
+// named by `.member =`. What has no value is zero.
+static void ct_init_list(Ctx* c, char* address, Type* type, Expr* e, long size) {
+    Type* k = type_canon(type);
+    if (k->kind != TY_STRUCT && k->kind != TY_ARRAY) {
+        ct_init_braced(c, address, type, e);
+        return;
+    }
     if (ct_writes(c, e->token, address, size)) memset(address, 0, (size_t)size);
     Type* st = type_unq(k);
     int position = 0;
@@ -1233,16 +1913,22 @@ static void ct_init(Ctx* c, char* address, Type* type, Expr* e) {
         Expr* designator = item->kind == E_INIT_ITEM ? item->left : NULL;
         Type* into = k->base;
         long offset = 0;
-        Token named = designator && designator->aux ? ct_field_member(c, designator->left) : designator ? designator->name : (Token){0};
+        Token named = {0};
+        if (designator) named = designator->aux ? ct_field_member(c, designator->left) : designator->name;
         if (designator && (k->kind != TY_STRUCT || !named.length || designator->right))
             FAIL(c, item->token, "only '.member = value' is handled in a list in braces at compile time");
         if (k->kind == TY_ARRAY) {
             if (position >= k->size_value) FAIL(c, item->token, "this array has no element %d", position);
             offset = position++ * ct_size(c, item->token, k->base);
         } else {
-            // without a name, the next member is meant
-            while (!designator && position < st->nfields && (st->fields[position].verbatim || !st->fields[position].name)) position++;
-            const char* member = designator ? tok_str(named) : position < st->nfields ? st->fields[position++].name : NULL;
+            const char* member = NULL;
+            if (designator) {
+                member = tok_str(named);
+            } else {
+                // without a name, the next member is meant
+                while (position < st->nfields && (st->fields[position].verbatim || !st->fields[position].name)) position++;
+                if (position < st->nfields) member = st->fields[position++].name;
+            }
             into = NULL;
             if (member) ct_layout(c, item->token, type, NULL, member, &offset, &into);
             if (!into) FAIL(c, item->token, "type '%s' has no member for this value", type_show(type));
@@ -1251,13 +1937,26 @@ static void ct_init(Ctx* c, char* address, Type* type, Expr* e) {
     }
 }
 
+// A value that is neither a struct nor an array, in braces, as C allows:
+// one value, in one pair of braces
+static void ct_init_braced(Ctx* c, char* address, Type* type, Expr* e) {
+    const char* shown = type_show(type);
+    if (e->blockstmt_size != 1)
+        FAIL(c, e->token, "a value of type '%s' is initialized with one value, and this list has %zu", shown, e->blockstmt_size);
+    Expr* item = e->blockstmt[0];
+    if (item->kind == E_INIT_ITEM) FAIL(c, item->token, "a value of type '%s' has no member or element to designate", shown);
+    if (item->kind == E_INIT_LIST) FAIL(c, item->token, "a value of type '%s' takes one pair of braces around it at most", shown);
+    ct_init(c, address, type, item);
+}
+
 // Returns the type of a compile-time variable that is being declared. An
 // array without a size takes the size of what it is initialized with.
 static Type* ct_declared(Ctx* c, Expr* d) {
     Type* type = resolve_type(c, d->type);
     Type* k = type_canon(type);
+    int unsized = k->kind == TY_ARRAY && !k->has_size_value && !k->size && d->left;
     int text = d->left && d->left->kind == E_IDENT && d->left->token.kind == TK_STR;
-    if (k->kind == TY_ARRAY && !k->has_size_value && !k->size && d->left && (text || d->left->kind == E_INIT_LIST)) {
+    if (unsized && (text || d->left->kind == E_INIT_LIST)) {
         Type* sized = type_new(TY_ARRAY);
         *sized = *k;
         sized->unq = NULL;
@@ -1265,8 +1964,7 @@ static Type* ct_declared(Ctx* c, Expr* d) {
         sized->size_value = text ? (long long)strlen(ct_string(d->left->token)) + 1 : (long long)d->left->blockstmt_size;
         sized->size = xstrf("%lld", sized->size_value);
         type = sized;
-    }
-    else if (k->kind == TY_ARRAY && !k->has_size_value && !k->size && d->left) {
+    } else if (unsized) {
         // or the size of the array it is initialized with, which is only asked for its type here
         ct_dry++;
         Type* from = ct_eval(c, d->left).type;
@@ -1280,6 +1978,48 @@ static Type* ct_declared(Ctx* c, Expr* d) {
 // ---------------------------------------------------------------------------
 // Names and types that are compile-time values
 // ---------------------------------------------------------------------------
+
+// The predefined '@' functions, which say something about a type
+static const char* const ct_builtin_names[] = {
+    "@fields", "@count", "@name", "@mangled", "@kind", "@implements", "@pointee", "@enumerators", "@generics"
+};
+enum { CT_FIELDS, CT_COUNT, CT_NAME, CT_MANGLED, CT_KIND, CT_IMPLEMENTS, CT_POINTEE, CT_ENUMERATORS, CT_GENERICS, CT_NONE };
+
+// What a predefined function is asked about, and the records it gives
+typedef struct {
+    int which;                  // CT_FIELDS, CT_COUNT, ...
+    Type* type;                 // the type it is asked about; void for a function (@generics)
+    Type* k;                    // that type, canonical
+    Type* u;                    // and unqualified: what has the fields or enumerators
+    Type* inst;                 // a generic typedef of something that is not a struct keeps its arguments in the name it gives
+    Type* named;                // what the answer is remembered for: the type, or the arguments of a function
+    Func* function;             // the function @generics is asked about
+    Type** bound;               // its generic arguments
+    Type* record;               // the type of the records: builtin::Field, Enumerator or Generic
+    long size;                  // the size of one
+    char* memory;               // the records
+    long n;                     // how many there are
+} CtReflection;
+
+static const char* ct_str(const char* text);
+static Type* ct_builtin_type(Ctx* c, Token at, const char* name);
+static Word ct_get(Ctx* c, Token at, char* record, Type* type, const char* member);
+static void ct_set(Ctx* c, Token at, char* record, Type* type, const char* member, Word value);
+static Token ct_ident(Ctx* c, Token name);
+static Token ct_field_member(Ctx* c, Expr* e);
+static Expr* ct_named(Ctx* c, Expr* e);
+static Type* resolve_ct_type(Ctx* c, Expr* s);
+static Type* resolve_ct_arg(Ctx* c, Expr* arg);
+static Type* ct_type_arg(Ctx* c, Expr* arg);
+static int ct_builtin(Ctx* c, Expr* call, Token at, CtValue* out);
+static CtReflection ct_reflection(Ctx* c, Token at, int which, Expr* first);
+static Entity* ct_named_entity(Ctx* c, Expr* e);
+static void ct_reflect_records(Ctx* c, Token at, CtReflection* r);
+static void ct_reflect_fields(Ctx* c, Token at, CtReflection* r);
+static void ct_reflect_enumerators(Ctx* c, Token at, CtReflection* r);
+static void ct_reflect_generics(Ctx* c, Token at, CtReflection* r);
+static const char* ct_reflect_name(CtReflection* r);
+static CtValue ct_reflect_array(CtReflection* r);
 
 static const char* ct_str(const char* text) {
     return (const char*)ct_keep(text, strlen(text) + 1);
@@ -1318,8 +2058,10 @@ static Token ct_ident(Ctx* c, Token name) {
         if (!g_ct.running && !ct_known(c, arg)) FAIL(c, arg->token, "the arguments of '@ident' must be compile-time strings and integers");
         CtValue v = ct_value(c, arg);
         Type* to = ct_pointee(v.type);
-        if (to && ct_kind(to) && (ct_kind(to) & 15) == 1 && ct_reads(c, arg->token, (void*)(intptr_t)v.v, 1)) buf_puts(&b, (const char*)(intptr_t)v.v);
-        else if (ct_kind(v.type) && !to && !(ct_kind(v.type) & CT_FLOAT)) buf_printf(&b, "%lld", (long long)v.v);
+        int is_string = to && ct_kind(to) && (ct_kind(to) & 15) == 1;
+        int is_integer = ct_kind(v.type) && !to && !(ct_kind(v.type) & CT_FLOAT);
+        if (is_string && ct_reads(c, arg->token, (void*)(intptr_t)v.v, 1)) buf_puts(&b, (const char*)(intptr_t)v.v);
+        else if (is_integer) buf_printf(&b, "%lld", (long long)v.v);
         else FAIL(c, arg->token, "the arguments of '@ident' must be compile-time strings and integers");
     }
     const char* text = buf_str(&b);
@@ -1336,7 +2078,8 @@ static Token ct_field_member(Ctx* c, Expr* e) {
     CtValue f = ct_value(c, e);
     Type* field = ct_builtin_type(c, e->token, "Field");
     char* record = (char*)(intptr_t)f.v;
-    if (type_unq(type_canon(f.type)) != type_unq(type_canon(field)) || !ct_get(c, e->token, record, field, "__of")) FAIL(c, e->token, "%s", rule);
+    int is_field = type_unq(type_canon(f.type)) == type_unq(type_canon(field));
+    if (!is_field || !ct_get(c, e->token, record, field, "__of")) FAIL(c, e->token, "%s", rule);
     return token_synth((const char*)(intptr_t)ct_get(c, e->token, record, field, "name"), TK_IDENT, e->token);
 }
 
@@ -1344,15 +2087,24 @@ static Token ct_field_member(Ctx* c, Expr* e) {
 // checker would trip over is the name it stands for: the expression itself if
 // it has none, and a copy otherwise.
 static Expr* ct_named(Ctx* c, Expr* e) {
-    Expr** inner = e->kind == E_MEMBER || e->kind == E_POSTFIX ? &e->left : e->kind == E_CALL || e->kind == E_INDEX ? &e->right : NULL;
+    // the part of the expression that can hold a name: a member's or a
+    // postfix operator's left, a call's or an element's right
+    int on_right = e->kind == E_CALL || e->kind == E_INDEX;
+    Expr** inner = NULL;
+    if (e->kind == E_MEMBER || e->kind == E_POSTFIX) inner = &e->left;
+    else if (on_right) inner = &e->right;
     Expr* named = inner ? ct_named(c, *inner) : NULL;
     int by_field = e->kind == E_MEMBER && e->right;
     int spliced = (e->kind == E_MEMBER && ct_spliced(e->name)) || (e->kind == E_IDENT && ct_spliced(e->token));
     if ((!inner || named == *inner) && !by_field && !spliced) return e;
     Expr* copy = (Expr*)xalloc(sizeof(Expr));
     *copy = *e;
-    if (inner) *(e->kind == E_CALL || e->kind == E_INDEX ? &copy->right : &copy->left) = named;
-    if (by_field) copy->name = ct_field_member(c, e->right), copy->right = NULL;
+    if (inner && on_right) copy->right = named;
+    else if (inner) copy->left = named;
+    if (by_field) {
+        copy->name = ct_field_member(c, e->right);
+        copy->right = NULL;
+    }
     if (spliced && e->kind == E_MEMBER) copy->name = ct_ident(c, e->name);
     if (spliced && e->kind == E_IDENT) copy->token = ct_ident(c, e->token);
     return copy;
@@ -1391,131 +2143,218 @@ static Type* ct_type_arg(Ctx* c, Expr* arg) {
 // Carries out a call of a predefined '@' function, which says something
 // about a type. Returns whether the name is that of one.
 static int ct_builtin(Ctx* c, Expr* call, Token at, CtValue* out) {
-    static const char* const names[] = {
-        "@fields", "@count", "@name", "@mangled", "@kind", "@implements", "@pointee", "@enumerators", "@generics"
-    };
-    enum { FIELDS, COUNT, NAME, MANGLED, KIND, IMPLEMENTS, POINTEE, ENUMERATORS, GENERICS, NONE };
     int which = 0;
-    while (which < NONE && !token_is(at, names[which])) which++;
-    if (which == NONE) return 0;
+    while (which < CT_NONE && !token_is(at, ct_builtin_names[which])) which++;
+    if (which == CT_NONE) return 0;
+    const char* name = ct_builtin_names[which];
     Expr* targs = call->right->generics;
-    int want = which == IMPLEMENTS ? 2 : 1;
+    int want = which == CT_IMPLEMENTS ? 2 : 1;
     if (generics_count(targs) != want || (call->left && call->left->left))
-        FAIL(c, at, "'%s' takes %d type argument(s) and nothing else, as in '%s<...>()'", names[which], want, names[which]);
-    // '@generics' also takes a function with its generic arguments
-    Expr* first = targs->blockstmt[0];
-    Entity* ent = which != GENERICS ? NULL : first->kind == E_PATH ? resolve_path(c, first).ent :
-                  first->kind == E_IDENT && first->token.kind == TK_IDENT && !ct_local(c, first->token) ? scope_entity(c, tok_str(first->token)) : NULL;
-    Func* function = ent && ent->kind == ENT_FUNC ? ent->func : NULL;
-    Type** bound = function ? resolve_func_args(c, function, first->generics, at) : NULL;
-    Type* type = function ? type_builtin(BK_VOID) : ct_type_arg(c, first);
-    Type* k = type_canon(type);
-    Type* u = type_unq(k);
-    Type* named = function ? (Type*)(void*)bound : type_unq(type);
-    // a generic typedef of something that is not a struct keeps its arguments in the name it gives
-    Type* inst = !function && type_unq(type)->is_inst ? type_unq(type) : u;
-    Type* text = type_ptr(type_qual(type_builtin(BK_CHAR), Q_CONST));
-    Type* record = NULL;
-    const char* key = xstrf("%d %p", which, (void*)named);
-    CtValue* known = which == IMPLEMENTS ? NULL : (CtValue*)map_get(&ct_reflected, key);
-    long size = 0, n = 0;
-    char* memory = NULL;
-    if (known) return *out = *known, 1;
-    if (which == FIELDS || which == ENUMERATORS || which == GENERICS) {
-        // these return an array of records, one for each thing the type has
-        record = ct_builtin_type(c, at, which == FIELDS ? "Field" : which == ENUMERATORS ? "Enumerator" : "Generic");
-        size = ct_size(c, at, record);
-        if (k->kind == TY_STRUCT || k->kind == TY_ENUM) struct_resolve(u);
-        memory = (char*)xalloc((size_t)((u->nfields + inst->nargs + generics_count(function ? function->generics : NULL) + 1) * size));
+        FAIL(c, at, "'%s' takes %d type argument(s) and nothing else, as in '%s<...>()'", name, want, name);
+    CtReflection r = ct_reflection(c, at, which, targs->blockstmt[0]);
+
+    // the answer for a type is worked out once
+    const char* key = xstrf("%d %p", which, (void*)r.named);
+    CtValue* known = which == CT_IMPLEMENTS ? NULL : (CtValue*)map_get(&ct_reflected, key);
+    if (known) {
+        *out = *known;
+        return 1;
     }
+    if (which == CT_FIELDS || which == CT_ENUMERATORS || which == CT_GENERICS) ct_reflect_records(c, at, &r);
     switch (which) {
-        case FIELDS: case COUNT:
-            if (k->kind != TY_STRUCT) FAIL(c, at, "'%s' needs a struct or union type, but '%s' is not one", names[which], type_show(type));
-            struct_resolve(u);
-            for (int i = 0; i < u->nfields; i++) {
-                Field* f = &u->fields[i];
-                char* r = memory + n * size;
-                long offset = 0;
-                Type* found = NULL;
-                if (f->verbatim || !f->type || !f->name || ct_member(f->type)) continue;
-                n++;
-                if (which == COUNT) continue;
-                ct_layout(c, at, type, NULL, f->name, &offset, &found);
-                ct_size(c, at, f->type);
-                ct_set(c, at, r, record, "size", ct_c_size);
-                ct_set(c, at, r, record, "name", (Word)(intptr_t)ct_str(f->name));
-                ct_set(c, at, r, record, "type_name", (Word)(intptr_t)ct_str(type_show(f->type)));
-                ct_set(c, at, r, record, "offset", offset);
-                ct_set(c, at, r, record, "bits", f->bits ? strtol(f->bits, NULL, 0) : 0);
-                ct_set(c, at, r, record, "kind", ct_field_kind(f->type));
-                ct_set(c, at, r, record, "type", (Word)(intptr_t)f->type);
-                ct_set(c, at, r, record, "__of", (Word)(intptr_t)type);
-            }
-            if (which == COUNT) *out = (CtValue){ type_builtin(BK_INT), n };
+        case CT_FIELDS: case CT_COUNT:
+            ct_reflect_fields(c, at, &r);
+            if (which == CT_COUNT) *out = (CtValue){ type_builtin(BK_INT), r.n };
             break;
-        case ENUMERATORS:
-            if (k->kind != TY_ENUM) FAIL(c, at, "'@enumerators' needs an enum type, but '%s' is not one", type_show(type));
-            for (int i = 0; i < u->nfields; i++) {
-                long long value = 0;
-                if (!u->fields[i].name) continue;
-                if (!enum_value(u, u->fields[i].name, &value))
-                    FAIL(c, at, "'@enumerators' needs the value of '%s' in '%s', which is not known at compile time",
-                         u->fields[i].name, type_show(type));
-                ct_set(c, at, memory + n * size, record, "name", (Word)(intptr_t)ct_str(u->fields[i].name));
-                ct_set(c, at, memory + n++ * size, record, "value", value);
-            }
+        case CT_ENUMERATORS:
+            ct_reflect_enumerators(c, at, &r);
             break;
-        case GENERICS:
-            for (int i = 0; i < (function ? generics_count(function->generics) : inst->is_inst && inst->generic ? inst->nargs : 0); i++) {
-                // a constant parameter has a declared type and a value, a type parameter is bound to a type
-                Expr* param = (function ? function->generics : inst->generic->decl->generics)->blockstmt[i];
-                Type* arg = function ? bound[i] : inst->args[i];
-                Type* shown = param->type ? arg->base : arg;
-                char* r = memory + n++ * size;
-                ct_set(c, at, r, record, "name", (Word)(intptr_t)ct_str(tok_str(param->name)));
-                ct_set(c, at, r, record, "type_name", (Word)(intptr_t)ct_str(type_show(shown)));
-                ct_set(c, at, r, record, "type", (Word)(intptr_t)shown);
-                if (param->type) ct_set(c, at, r, record, "value", (Word)(intptr_t)ct_str(arg->has_value ? xstrf("%lld", arg->value) : arg->name));
-            }
+        case CT_GENERICS:
+            ct_reflect_generics(c, at, &r);
             break;
-        case NAME: case MANGLED: {
-            const char* name = named->is_inst && named->generic ? named->generic->name : named->name ? named->name : named->cname;
-            if (!name) name = type_show(type);
-            if (which == MANGLED && named->sym) name = symbol_ref(named->sym);
-            *out = (CtValue){ text, (Word)(intptr_t)ct_str(name) };
+        case CT_NAME: case CT_MANGLED: {
+            Type* text = type_ptr(type_qual(type_builtin(BK_CHAR), Q_CONST));
+            *out = (CtValue){ text, (Word)(intptr_t)ct_str(ct_reflect_name(&r)) };
             break;
         }
-        case KIND:
-            *out = (CtValue){ ct_builtin_type(c, at, "FieldKind"), ct_field_kind(type) };
+        case CT_KIND:
+            *out = (CtValue){ ct_builtin_type(c, at, "FieldKind"), ct_field_kind(r.type) };
             break;
-        case POINTEE:
-            if (k->kind != TY_PTR) FAIL(c, at, "'@pointee' needs a pointer type, but '%s' is not one", type_show(type));
-            *out = (CtValue){ ct_type_type(), (Word)(intptr_t)k->base };
+        case CT_POINTEE:
+            if (r.k->kind != TY_PTR) FAIL(c, at, "'@pointee' needs a pointer type, but '%s' is not one", type_show(r.type));
+            *out = (CtValue){ ct_type_type(), (Word)(intptr_t)r.k->base };
             break;
-        case IMPLEMENTS: {
+        case CT_IMPLEMENTS: {
             Expr* bound = type_argument(targs->blockstmt[1]);
             if (!bound) FAIL(c, targs->blockstmt[1]->token, "the second argument of '@implements' must be a trait");
-            *out = (CtValue){ type_builtin(BK_INT), ct_implements(c, at, type, bound) };
+            *out = (CtValue){ type_builtin(BK_INT), ct_implements(c, at, r.type, bound) };
             return 1;
         }
     }
-    if (record) {
-        Type* array = type_new(TY_ARRAY);
-        array->base = record;
-        array->has_size_value = 1;
-        array->size_value = n;
-        array->size = xstrf("%ld", n);
-        *out = (CtValue){ array, (Word)(intptr_t)ct_keep(memory, (size_t)(n * size)) };
-    }
+    if (r.record) *out = ct_reflect_array(&r);
     known = (CtValue*)xalloc(sizeof(CtValue));
     *known = *out;
     map_put(&ct_reflected, key, known);
     return 1;
 }
 
+// What a predefined function is asked about: the type of its argument, or for
+// @generics also a function with its generic arguments
+static CtReflection ct_reflection(Ctx* c, Token at, int which, Expr* first) {
+    CtReflection r = { .which = which };
+    Entity* ent = which == CT_GENERICS ? ct_named_entity(c, first) : NULL;
+    r.function = ent && ent->kind == ENT_FUNC ? ent->func : NULL;
+    r.bound = r.function ? resolve_func_args(c, r.function, first->generics, at) : NULL;
+    r.type = r.function ? type_builtin(BK_VOID) : ct_type_arg(c, first);
+    r.k = type_canon(r.type);
+    r.u = type_unq(r.k);
+    r.named = r.function ? (Type*)(void*)r.bound : type_unq(r.type);
+    r.inst = !r.function && type_unq(r.type)->is_inst ? type_unq(r.type) : r.u;
+    return r;
+}
+
+// What a name in a generic argument stands for, if it is the name of something
+// other than a compile-time variable
+static Entity* ct_named_entity(Ctx* c, Expr* e) {
+    if (e->kind == E_PATH) return resolve_path(c, e).ent;
+    if (e->kind == E_IDENT && e->token.kind == TK_IDENT && !ct_local(c, e->token)) return scope_entity(c, tok_str(e->token));
+    return NULL;
+}
+
+// @fields, @enumerators and @generics give an array of records, one for each
+// thing the type has: makes room for them
+static void ct_reflect_records(Ctx* c, Token at, CtReflection* r) {
+    const char* record = "Generic";
+    if (r->which == CT_FIELDS) record = "Field";
+    else if (r->which == CT_ENUMERATORS) record = "Enumerator";
+    r->record = ct_builtin_type(c, at, record);
+    r->size = ct_size(c, at, r->record);
+    if (r->k->kind == TY_STRUCT || r->k->kind == TY_ENUM) struct_resolve(r->u);
+    long most = r->u->nfields + r->inst->nargs + generics_count(r->function ? r->function->generics : NULL) + 1;
+    r->memory = (char*)xalloc((size_t)(most * r->size));
+}
+
+// @fields: a record for each member of a struct; @count only counts them
+static void ct_reflect_fields(Ctx* c, Token at, CtReflection* r) {
+    if (r->k->kind != TY_STRUCT)
+        FAIL(c, at, "'%s' needs a struct or union type, but '%s' is not one", ct_builtin_names[r->which], type_show(r->type));
+    struct_resolve(r->u);
+    for (int i = 0; i < r->u->nfields; i++) {
+        Field* f = &r->u->fields[i];
+        if (f->verbatim || !f->type || !f->name || ct_member(f->type)) continue;
+        if (r->which == CT_COUNT) {
+            r->n++;
+            continue;
+        }
+        char* record = r->memory + r->n++ * r->size;
+        long offset = 0;
+        Type* found = NULL;
+        ct_layout(c, at, r->type, NULL, f->name, &offset, &found);
+        ct_size(c, at, f->type);
+        ct_set(c, at, record, r->record, "size", ct_c_size);
+        ct_set(c, at, record, r->record, "name", (Word)(intptr_t)ct_str(f->name));
+        ct_set(c, at, record, r->record, "type_name", (Word)(intptr_t)ct_str(type_show(f->type)));
+        ct_set(c, at, record, r->record, "offset", offset);
+        ct_set(c, at, record, r->record, "bits", f->bits ? strtol(f->bits, NULL, 0) : 0);
+        ct_set(c, at, record, r->record, "kind", ct_field_kind(f->type));
+        ct_set(c, at, record, r->record, "type", (Word)(intptr_t)f->type);
+        ct_set(c, at, record, r->record, "__of", (Word)(intptr_t)r->type);
+    }
+}
+
+// @enumerators: a record for each enumerator, with its value
+static void ct_reflect_enumerators(Ctx* c, Token at, CtReflection* r) {
+    if (r->k->kind != TY_ENUM) FAIL(c, at, "'@enumerators' needs an enum type, but '%s' is not one", type_show(r->type));
+    for (int i = 0; i < r->u->nfields; i++) {
+        const char* name = r->u->fields[i].name;
+        long long value = 0;
+        if (!name) continue;
+        if (!enum_value(r->u, name, &value))
+            FAIL(c, at, "'@enumerators' needs the value of '%s' in '%s', which is not known at compile time", name, type_show(r->type));
+        char* record = r->memory + r->n++ * r->size;
+        ct_set(c, at, record, r->record, "name", (Word)(intptr_t)ct_str(name));
+        ct_set(c, at, record, r->record, "value", value);
+    }
+}
+
+// @generics: a record for each generic argument of a function, or of a type
+// that a generic typedef made. A constant parameter has a declared type and a
+// value, a type parameter is bound to a type.
+static void ct_reflect_generics(Ctx* c, Token at, CtReflection* r) {
+    int count = 0;
+    Expr* params = NULL;
+    if (r->function) {
+        count = generics_count(r->function->generics);
+        params = r->function->generics;
+    } else if (r->inst->is_inst && r->inst->generic) {
+        count = r->inst->nargs;
+        params = r->inst->generic->decl->generics;
+    }
+    for (int i = 0; i < count; i++) {
+        Expr* param = params->blockstmt[i];
+        Type* arg = r->function ? r->bound[i] : r->inst->args[i];
+        Type* shown = param->type ? arg->base : arg;
+        char* record = r->memory + r->n++ * r->size;
+        ct_set(c, at, record, r->record, "name", (Word)(intptr_t)ct_str(tok_str(param->name)));
+        ct_set(c, at, record, r->record, "type_name", (Word)(intptr_t)ct_str(type_show(shown)));
+        ct_set(c, at, record, r->record, "type", (Word)(intptr_t)shown);
+        if (param->type) {
+            const char* value = arg->has_value ? xstrf("%lld", arg->value) : arg->name;
+            ct_set(c, at, record, r->record, "value", (Word)(intptr_t)ct_str(value));
+        }
+    }
+}
+
+// @name: the name of the generic typedef a type comes from, or the type's
+// name, or its name in C; @mangled: the name the generated C gives it
+static const char* ct_reflect_name(CtReflection* r) {
+    Type* named = r->named;
+    const char* name;
+    if (named->is_inst && named->generic) name = named->generic->name;
+    else if (named->name) name = named->name;
+    else name = named->cname;
+    if (!name) name = type_show(r->type);
+    if (r->which == CT_MANGLED && named->sym) name = symbol_ref(named->sym);
+    return name;
+}
+
+// The records, as a compile-time array of them
+static CtValue ct_reflect_array(CtReflection* r) {
+    Type* array = type_new(TY_ARRAY);
+    array->base = r->record;
+    array->has_size_value = 1;
+    array->size_value = r->n;
+    array->size = xstrf("%ld", r->n);
+    return (CtValue){ array, (Word)(intptr_t)ct_keep(r->memory, (size_t)(r->n * r->size)) };
+}
+
 // ---------------------------------------------------------------------------
 // Calls
 // ---------------------------------------------------------------------------
+
+// A compile-time call while it is set up
+typedef struct {
+    Token at;                   // the name of what is called, where errors are reported
+    Func* f;                    // the function
+    Type** ivals;               // for a method: the generic arguments of its impl
+    Type* self;                 // and the type of its receiver
+    Type** own;                 // the function's own generic arguments
+    CtValue args[MAX_ARGS + 1];
+    int argc;
+    int offset;                 // 1 for a method, whose receiver is args[0]
+} CtCall;
+
+static CtValue ct_call(Ctx* c, Expr* call);
+static int ct_call_target(Ctx* c, Expr* call, Expr* callee, CtCall* k, CtValue* out);
+static int ct_complex_function(Ctx* c, Expr* callee);
+static CtValue ct_complex_call(Ctx* c, Expr* call, int which);
+static void ct_call_arguments(Ctx* c, Expr* call, CtCall* k);
+static void ct_call_generics(Ctx* c, Expr* callee, CtCall* k);
+static Type* ct_decayed(Type* type);
+static void ct_call_key(Buf* key, CtCall* k, SrcFile* use);
+static void ct_call_parameters(Ctx* c, CtCall* k, Ctx* fc, Type* type, Buf* key);
+static CtValue ct_call_run(Ctx* c, CtCall* k, Ctx* fc, Type* type, SrcFile* use, long floor, const char* key);
+static _Noreturn void ct_too_deep(Ctx* c, Token at);
 
 // Runs the function that a call names, for the arguments it is given. That
 // is an '@' function, or, where the call is itself in a function that is
@@ -1525,121 +2364,232 @@ static int ct_builtin(Ctx* c, Expr* call, Token at, CtValue* out) {
 // same arguments.
 static CtValue ct_call(Ctx* c, Expr* call) {
     Expr* callee = ct_named(c, call->right);
-    Token at = callee->token, name = at;
-    Func* f = NULL;
-    Type** ivals = NULL;
-    Type** own = NULL;
-    Type* self = NULL;
-    CtValue args[MAX_ARGS + 1], predefined;
-    Val shown[MAX_ARGS + 1];
-    int argc = 0, offset = 0;
+    CtCall k = { .at = callee->token };
+    CtValue predefined;
     long top = ct_top;
-    if (callee->kind == E_MEMBER && token_is(callee->token, ".")) {
-        // value.method(arguments): the value is the first argument
-        if (!g_ct.running) FAIL(c, at, "a method is only run at compile time when a function that is being run calls it");
-        args[argc++] = ct_eval(c, callee->left);
-        at = callee->name;
-        f = find_method(c, type_unq(args[0].type), tok_str(at), at, &ivals);
-        self = impl_self(f->impl, ivals);
-        offset = 1;
-    } else if ((callee->kind == E_IDENT && at.kind == TK_IDENT) || callee->kind == E_PATH) {
-        Module* mod = ct_space(c, callee, &name);
-        at = name;
-        if (*name.start == '@') {
-            if (ct_builtin(c, call, name, &predefined)) return predefined;
-            f = mod ? (Func*)map_get(&ct_funcs, xstrf("%s\x01%s", mod->name, tok_str(name))) : NULL;
-            if (!f) FAIL(c, name, "there is no '@' function named '%s' here", tok_str(name));
-        } else if (g_ct.running && callee->kind == E_PATH) {
-            PathRef r = resolve_path(c, callee);
-            if (r.ent && r.ent->kind == ENT_FUNC) f = r.ent->func;
-        } else if (g_ct.running && mod) {
-            Entity* ent = scope_entity(c, tok_str(name));
-            if (ent && ent->kind == ENT_FUNC) f = ent->func;
-        }
-    }
-    if (!f || !f->def) FAIL(c, at, "'%s' cannot be called at compile time: typedc has no definition of it to run", tok_str(at));
-    for (Expr* arg = call->left; arg; arg = arg->right) {
-        if (!arg->left) continue;
-        if (argc == MAX_ARGS) FAIL(c, at, "too many arguments");
-        args[argc++] = ct_eval(c, arg->left);
-    }
+    if (ct_call_target(c, call, callee, &k, &predefined)) return predefined;
+    ct_call_arguments(c, call, &k);
+    ct_call_generics(c, callee, &k);
 
-    // the generic arguments are written out, or follow from the types of the arguments
-    int ngen = generics_count(f->generics);
-    if (callee->generics) {
-        own = resolve_func_args(c, f, callee->generics, at);
-    } else if (ngen) {
-        for (int i = 0; i < argc; i++)
-            shown[i] = val("", type_canon(args[i].type)->kind == TY_ARRAY ? type_ptr(type_canon(args[i].type)->base) : args[i].type);
-        own = infer_generics(c, f, ivals, self, shown + offset, argc - offset, offset, NULL, at, 0);
-    }
+    Func* f = k.f;
     if (*f->name == '@' && !map_has(&ct_brings, xstrf("%p", (void*)f))) f->file = ct_function_file(f->file, f);
     Ctx fc = ctx_for_file(f->file);
-    fc.tenv = tenv_bind(f->generics, own, f->impl ? tenv_bind(f->impl->decl->generics, ivals, NULL) : NULL);
-    fc.self = self;
+    fc.tenv = tenv_bind(f->generics, k.own, f->impl ? tenv_bind(f->impl->decl->generics, k.ivals, NULL) : NULL);
+    fc.self = k.self;
     fc.in_func = 1;
     Type* type = type_canon(resolve_type(&fc, f->def->type));
-    Type* result = type_canon(type->base);
-    if (argc != type->nargs) FAIL(c, at, "'%s' expects %d argument(s), %d given", f->name, type->nargs - offset, argc - offset);
+    if (k.argc != type->nargs) FAIL(c, k.at, "'%s' expects %d argument(s), %d given", f->name, type->nargs - k.offset, k.argc - k.offset);
     if (ct_dry) return (CtValue){ type->base, 0 };
 
     // The call is known by its function, its generic arguments, the namespace
     // it is used from, and its arguments.
-    CtState outer = g_ct;
-    SrcFile* use = outer.running ? outer.use : c->file;
-    int at_call = *f->name == '@';
+    SrcFile* use = g_ct.running ? g_ct.use : c->file;
     long floor = ct_top;
     Buf key = {0};
-    buf_printf(&key, "%p %s", (void*)f, use->mod->name);
-    for (int i = 0; i < ngen; i++) buf_putc(&key, ' '), type_key_into(&key, own[i]);
-    for (int i = 0; f->impl && i < f->impl->nparams; i++) buf_putc(&key, ' '), type_key_into(&key, ivals[i]);
-    for (int i = 0; i < argc; i++) {
-        // an array that is passed is a pointer in the function
-        Type* param = type_canon(type->args[i])->kind == TY_ARRAY ? type_ptr(type_canon(type->args[i])->base) : type->args[i];
-        param = type_qual(param, Q_COMPTIME);
-        long size = ct_size(c, at, param);
-        char* place = ct_at(ct_room(c, at, size));
-        Word held = ct_assign(c, at, place, param, args[i]).v;
-        buf_putc(&key, ',');
-        if (ct_is_type(param) && held) type_key_into(&key, (Type*)(intptr_t)held);
-        else for (long b = 0; b < size; b++) buf_printf(&key, "%02x", (unsigned char)place[b]);
-        local_push(&fc, L_VAR, type->pnames[i] ? type->pnames[i] : "", param);
-        fc.locals->at = place;
-    }
-    CtValue* known = at_call ? (CtValue*)map_get(&ct_results, buf_str(&key)) : NULL;
-    if (!known) {
-        if (ct_depth == CT_CALLS) {
-            // a recursion that does not end: name the calls it went through last
-            Buf chain = {0};
-            for (int i = ct_depth; i-- > ct_depth - 5;) buf_printf(&chain, "%s, called from ", ct_calls[i]);
-            FAIL(c, at, "compile-time calls are nested more than %d deep: %s... (a function that calls itself has to end by itself)",
-                 CT_CALLS, buf_str(&chain));
-        }
-        // an ordinary function works on behalf of the '@' call that runs it
-        int soft = ct_soft;
-        ct_soft = 0;
-        ct_calls[ct_depth++] = f->name;
-        g_ct = (CtState){ .running = f, .ret = type->base, .unrolling = -1, .deciding = -1, .use = use,
-                          .floor = at_call ? floor : outer.floor, .call = at_call ? buf_str(&key) : outer.call };
-        ct_result = (CtValue){ type->base, 0 };
-        for (size_t i = 0; i < f->def->right->blockstmt_size; i++) gen_stmt(&fc, f->def->right->blockstmt[i], NULL, 0);
-        if (g_ct.flow != CT_RETURN && !(result->kind == TY_BUILTIN && result->builtin == BK_VOID))
-            FAIL(&fc, f->def->name, "'%s' ended without returning a value", f->name);
-        known = (CtValue*)xalloc(sizeof(CtValue));
-        *known = ct_result;
-        // a result that rests on something being unimplemented is not settled for others
-        if (at_call && !ct_soft) map_put(&ct_results, buf_str(&key), known);
-        ct_soft |= soft;
-        ct_depth--;
-        g_ct = outer;
-    }
+    ct_call_key(&key, &k, use);
+    ct_call_parameters(c, &k, &fc, type, &key);
+    CtValue result = ct_call_run(c, &k, &fc, type, use, floor, buf_str(&key));
     ct_top = top;
+    return result;
+}
+
+// Finds the function a call names: a method of a value, whose value becomes
+// the first argument; an '@' function; or, in a function that is being run,
+// any function. A predefined '@' function is carried out right here: its
+// result is in `out`, and 1 is returned.
+static int ct_call_target(Ctx* c, Expr* call, Expr* callee, CtCall* k, CtValue* out) {
+    int which = ct_complex_function(c, callee);
+    if (which >= 0) {
+        *out = ct_complex_call(c, call, which);
+        return 1;
+    }
+    if (callee->kind == E_MEMBER && token_is(callee->token, ".")) {
+        // value.method(arguments): the value is the first argument
+        if (!g_ct.running) FAIL(c, k->at, "a method is only run at compile time when a function that is being run calls it");
+        k->args[k->argc++] = ct_eval(c, callee->left);
+        k->at = callee->name;
+        k->f = find_method(c, type_unq(k->args[0].type), tok_str(k->at), k->at, &k->ivals);
+        k->self = impl_self(k->f->impl, k->ivals);
+        k->offset = 1;
+    } else if ((callee->kind == E_IDENT && k->at.kind == TK_IDENT) || callee->kind == E_PATH) {
+        Token name;
+        Module* mod = ct_space(c, callee, &name);
+        k->at = name;
+        if (*name.start == '@') {
+            if (ct_builtin(c, call, name, out)) return 1;
+            k->f = mod ? (Func*)map_get(&ct_funcs, xstrf("%s\x01%s", mod->name, tok_str(name))) : NULL;
+            if (!k->f) FAIL(c, name, "there is no '@' function named '%s' here", tok_str(name));
+        } else if (g_ct.running && callee->kind == E_PATH) {
+            PathRef r = resolve_path(c, callee);
+            if (r.ent && r.ent->kind == ENT_FUNC) k->f = r.ent->func;
+        } else if (g_ct.running && mod) {
+            Entity* ent = scope_entity(c, tok_str(name));
+            if (ent && ent->kind == ENT_FUNC) k->f = ent->func;
+        }
+    }
+    if (!k->f || !k->f->def) FAIL(c, k->at, "'%s' cannot be called at compile time: typedc has no definition of it to run", tok_str(k->at));
+    return 0;
+}
+
+// creal, cimag and conj of <complex.h>, with their f and l forms, are run by
+// typedc. Returns which of them a call names (an index into `names`), or -1.
+static int ct_complex_function(Ctx* c, Expr* callee) {
+    static const char* const names[] = {
+        "creal", "cimag", "conj", "crealf", "cimagf", "conjf", "creall", "cimagl", "conjl",
+    };
+    if (callee->kind != E_IDENT || callee->token.kind != TK_IDENT) return -1;
+    const char* name = tok_str(callee->token);
+    for (int i = 0; i < (int)(sizeof names / sizeof *names); i++) {
+        if (strcmp(name, names[i]) != 0) continue;
+        // the one a C header declares, not a function of the program
+        Entity* e = scope_entity(c, name);
+        return e && e->kind == ENT_FUNC && e->file->mod->is_c ? i : -1;
+    }
+    return -1;
+}
+
+// Runs creal, cimag or conj (`which`, as ct_complex_function returns it). The
+// argument becomes the complex type of the parameter, as in any call.
+static CtValue ct_complex_call(Ctx* c, Expr* call, int which) {
+    static const BuiltinKind parameters[] = { BK_CDOUBLE, BK_CFLOAT, BK_CLDOUBLE };
+    Token at = call->right->token;
+    Type* type = type_builtin(parameters[which / 3]);
+    Expr* argument = NULL;
+    int count = 0;
+    for (Expr* arg = call->left; arg; arg = arg->right) {
+        if (!arg->left) continue;
+        argument = arg->left;
+        count++;
+    }
+    if (count != 1) FAIL(c, at, "'%s' expects 1 argument, %d given", tok_str(at), count);
+    double re;
+    double im;
+    ct_complex_parts(c, at, ct_to_complex(c, at, ct_eval(c, argument), type), &re, &im);
+    switch (which % 3) {
+        case 0:  return (CtValue){ ct_complex_real(type), ct_bits(re) };
+        case 1:  return (CtValue){ ct_complex_real(type), ct_bits(im) };
+        default: return ct_complex_make(c, at, type, re, -im);
+    }
+}
+
+// Evaluates the arguments
+static void ct_call_arguments(Ctx* c, Expr* call, CtCall* k) {
+    for (Expr* arg = call->left; arg; arg = arg->right) {
+        if (!arg->left) continue;
+        if (k->argc == MAX_ARGS) FAIL(c, k->at, "too many arguments");
+        k->args[k->argc++] = ct_eval(c, arg->left);
+    }
+}
+
+// The generic arguments: written out, or following from the types of the arguments
+static void ct_call_generics(Ctx* c, Expr* callee, CtCall* k) {
+    if (callee->generics) {
+        k->own = resolve_func_args(c, k->f, callee->generics, k->at);
+        return;
+    }
+    if (!generics_count(k->f->generics)) return;
+    Val shown[MAX_ARGS + 1];
+    for (int i = 0; i < k->argc; i++) shown[i] = val("", ct_decayed(k->args[i].type));
+    k->own = infer_generics(c, k->f, k->ivals, k->self, shown + k->offset, k->argc - k->offset, k->offset, NULL, k->at, 0);
+}
+
+// An array that is passed is a pointer to its first element in the function
+static Type* ct_decayed(Type* type) {
+    Type* k = type_canon(type);
+    return k->kind == TY_ARRAY ? type_ptr(k->base) : type;
+}
+
+// The start of the key of a call: its function, the namespace it is used
+// from, and its generic arguments
+static void ct_call_key(Buf* key, CtCall* k, SrcFile* use) {
+    Func* f = k->f;
+    buf_printf(key, "%p %s", (void*)f, use->mod->name);
+    for (int i = 0; i < generics_count(f->generics); i++) {
+        buf_putc(key, ' ');
+        type_key_into(key, k->own[i]);
+    }
+    for (int i = 0; f->impl && i < f->impl->nparams; i++) {
+        buf_putc(key, ' ');
+        type_key_into(key, k->ivals[i]);
+    }
+}
+
+// Gives the parameters, which are the function's first variables, the values
+// of the arguments, and adds those values to the key
+static void ct_call_parameters(Ctx* c, CtCall* k, Ctx* fc, Type* type, Buf* key) {
+    for (int i = 0; i < k->argc; i++) {
+        Type* param = type_qual(ct_decayed(type->args[i]), Q_COMPTIME);
+        long size = ct_size(c, k->at, param);
+        char* place = ct_at(ct_room(c, k->at, size));
+        Word held = ct_assign(c, k->at, place, param, k->args[i]).v;
+        buf_putc(key, ',');
+        if (ct_is_type(param) && held) {
+            type_key_into(key, (Type*)(intptr_t)held);
+        } else {
+            for (long b = 0; b < size; b++) buf_printf(key, "%02x", (unsigned char)place[b]);
+        }
+        local_push(fc, L_VAR, type->pnames[i] ? type->pnames[i] : "", param);
+        fc->locals->at = place;
+    }
+}
+
+// Runs the body of the function, unless it is an '@' function that was
+// already run with this key
+static CtValue ct_call_run(Ctx* c, CtCall* k, Ctx* fc, Type* type, SrcFile* use, long floor, const char* key) {
+    Func* f = k->f;
+    int at_call = *f->name == '@';
+    CtValue* known = at_call ? (CtValue*)map_get(&ct_results, key) : NULL;
+    if (known) return *known;
+    if (ct_depth == CT_CALLS) ct_too_deep(c, k->at);
+
+    // an ordinary function works on behalf of the '@' call that runs it
+    CtState outer = g_ct;
+    int soft = ct_soft;
+    ct_soft = 0;
+    ct_calls[ct_depth++] = f->name;
+    g_ct = (CtState){ .running = f, .ret = type->base, .unrolling = -1, .deciding = -1, .use = use,
+                      .floor = at_call ? floor : outer.floor, .call = at_call ? key : outer.call };
+    ct_result = (CtValue){ type->base, 0 };
+    Expr* body = f->def->right;
+    for (size_t i = 0; i < body->blockstmt_size; i++) gen_stmt(fc, body->blockstmt[i], NULL, 0);
+    Type* result = type_canon(type->base);
+    int returns_nothing = result->kind == TY_BUILTIN && result->builtin == BK_VOID;
+    if (g_ct.flow != CT_RETURN && !returns_nothing) FAIL(fc, f->def->name, "'%s' ended without returning a value", f->name);
+    known = (CtValue*)xalloc(sizeof(CtValue));
+    *known = ct_result;
+    // a result that rests on something being unimplemented is not settled for others
+    if (at_call && !ct_soft) map_put(&ct_results, key, known);
+    ct_soft |= soft;
+    ct_depth--;
+    g_ct = outer;
     return *known;
+}
+
+// A recursion that does not end: names the calls it went through last
+static _Noreturn void ct_too_deep(Ctx* c, Token at) {
+    Buf chain = {0};
+    for (int i = ct_depth; i-- > ct_depth - 5;) buf_printf(&chain, "%s, called from ", ct_calls[i]);
+    FAIL(c, at, "compile-time calls are nested more than %d deep: %s... (a function that calls itself has to end by itself)",
+         CT_CALLS, buf_str(&chain));
 }
 
 // ---------------------------------------------------------------------------
 // What a program declares for compile time
 // ---------------------------------------------------------------------------
+
+static Module* ct_builtin_module(void);
+static Word ct_field_kind(Type* type);
+static void ct_parse_ready(void);
+static void ct_prescan(SrcFile* f, Expr* def);
+static Module* ct_import_find(SrcFile* f, const char* name);
+static SrcFile* ct_function_file(SrcFile* f, Func* fn);
+static void ct_function(SrcFile* f, Expr* def);
+static void ct_collect(SrcFile* f);
+static void ct_check_methods(SrcFile* f, Expr* e);
+static void ct_check_parameters(SrcFile* f, Expr* e);
+
+static List ct_prescanned;      // the generator starts the first pass found: the start, then its file
+static Map ct_emit_types;       // an '@' function -> List* of the type names it emits
 
 static const char ct_builtin_source[] =
     "#include <stddef.h>\n"
@@ -1648,6 +2598,7 @@ static const char ct_builtin_source[] =
     "    FIELD_INT, FIELD_UINT, FIELD_LONG, FIELD_ULONG, FIELD_LLONG, FIELD_ULLONG,\n"
     "    FIELD_FLOAT, FIELD_DOUBLE, FIELD_LDOUBLE, FIELD_POINTER, FIELD_ARRAY, FIELD_STRUCT,\n"
     "    FIELD_UNION, FIELD_ENUM, FIELD_FUNCTION, FIELD_FUNCTION_POINTER,\n"
+    "    FIELD_CFLOAT, FIELD_CDOUBLE, FIELD_CLDOUBLE,\n"
     "} FieldKind;\n"
     "pub typedef struct {\n"
     "    const char* name;\n"
@@ -1676,10 +2627,12 @@ static Module* ct_builtin_module(void) {
 
 // Returns what sort of type a type is, as a value of builtin::FieldKind.
 static Word ct_field_kind(Type* type) {
-    enum { OTHER, POINTER = 16, ARRAY, STRUCT, UNION, ENUM, FUNCTION, FUNCTION_POINTER };
+    enum { OTHER, POINTER = 16, ARRAY, STRUCT, UNION, ENUM, FUNCTION, FUNCTION_POINTER, CFLOAT };
     Type* k = type_canon(type);
     switch (k->kind) {
-        case TY_BUILTIN: return k->builtin >= BK_BOOL && k->builtin <= BK_LDOUBLE ? (Word)k->builtin : OTHER;
+        case TY_BUILTIN:
+            if (ct_complex(k)) return CFLOAT + (Word)(k->builtin - BK_CFLOAT);
+            return k->builtin >= BK_BOOL && k->builtin <= BK_LDOUBLE ? (Word)k->builtin : OTHER;
         case TY_PTR:     return type_canon(k->base)->kind == TY_FUNC ? FUNCTION_POINTER : POINTER;
         case TY_FUNC:    return FUNCTION;
         case TY_ARRAY:   return ARRAY;
@@ -1688,9 +2641,6 @@ static Word ct_field_kind(Type* type) {
         default:         return OTHER;
     }
 }
-
-static List ct_prescanned;      // the generator starts the first pass found: the start, then its file
-static Map ct_emit_types;       // an '@' function -> List* of the type names it emits
 
 // Every file has had its first pass. A type that a generator emits under a
 // plain name is a type name in the namespace the generator is started in.
@@ -1715,10 +2665,17 @@ static void ct_prescan(SrcFile* f, Expr* def) {
     }
     for (size_t i = 0; i < def->blockstmt_size; i++) {
         Expr* d = def->blockstmt[i];
-        const char* function = xstrf("%s\x01%s", f->mod->name, tok_str(def->name));
-        List* types = (List*)map_get(&ct_emit_types, function);
-        if (d->kind == E_IDENT && !types) map_put(&ct_emit_types, function, types = (List*)xalloc(sizeof(List)));
-        if (d->kind == E_IDENT) list_push(types, tok_str(d->token));
+        if (d->kind == E_IDENT) {
+            // a type that the function emits under a plain name
+            const char* function = xstrf("%s\x01%s", f->mod->name, tok_str(def->name));
+            List* types = (List*)map_get(&ct_emit_types, function);
+            if (!types) {
+                types = (List*)xalloc(sizeof(List));
+                map_put(&ct_emit_types, function, types);
+            }
+            list_push(types, tok_str(d->token));
+            continue;
+        }
         if (d->kind != E_IMPORT) continue;
         Import* import = (Import*)xalloc(sizeof(Import));
         *import = (Import){ tok_str(d->name), module_for_import(f, d), d->name };
@@ -1728,8 +2685,10 @@ static void ct_prescan(SrcFile* f, Expr* def) {
 }
 
 static Module* ct_import_find(SrcFile* f, const char* name) {
-    for (size_t i = 0; i < f->ct_imports.len; i++)
-        if (strcmp(((Import*)f->ct_imports.items[i])->name, name) == 0) return ((Import*)f->ct_imports.items[i])->mod;
+    for (size_t i = 0; i < f->ct_imports.len; i++) {
+        Import* import = (Import*)f->ct_imports.items[i];
+        if (strcmp(import->name, name) == 0) return import->mod;
+    }
     return NULL;
 }
 
@@ -1740,21 +2699,27 @@ static SrcFile* ct_function_file(SrcFile* f, Func* fn) {
     SrcFile* own = (SrcFile*)xalloc(sizeof(SrcFile));
     SrcFile* brings = (SrcFile*)xalloc(sizeof(SrcFile));
     Expr* body = fn->def->right;
-    *own = *brings = *f;
-    own->includes = brings->includes = brings->items = (List){0};
+    *own = *f;
+    *brings = *f;
+    own->includes = (List){0};
     own->imports = (Import*)xalloc(((size_t)f->nimports + body->blockstmt_size + 1) * sizeof(Import));
+    if (f->nimports) memcpy(own->imports, f->imports, (size_t)f->nimports * sizeof(Import));
+    for (size_t i = 0; i < f->includes.len; i++) list_push(&own->includes, f->includes.items[i]);
+    brings->includes = (List){0};
+    brings->items = (List){0};
     brings->imports = (Import*)xalloc((body->blockstmt_size + 1) * sizeof(Import));
     brings->nimports = 0;
     brings->last_raw = NULL;
     brings->cunit = NULL;
     brings->statics = (Map){0};
     brings->ast = expr_new(E_FILE, fn->def->name, NULL, NULL);
-    if (f->nimports) memcpy(own->imports, f->imports, (size_t)f->nimports * sizeof(Import));
-    for (size_t i = 0; i < f->includes.len; i++) list_push(&own->includes, f->includes.items[i]);
     for (size_t i = 0; i < body->blockstmt_size; i++) {
         Expr* s = body->blockstmt[i];
-        if (s->kind == E_IMPORT)
-            own->imports[own->nimports++] = brings->imports[brings->nimports++] = (Import){ tok_str(s->name), module_for_import(f, s), s->name };
+        if (s->kind == E_IMPORT) {
+            Import import = { tok_str(s->name), module_for_import(f, s), s->name };
+            own->imports[own->nimports++] = import;
+            brings->imports[brings->nimports++] = import;
+        }
         if (s->kind != E_INCLUDE) continue;
         list_push(&own->includes, tok_str(s->token));
         list_push(&brings->includes, tok_str(s->token));
@@ -1782,19 +2747,23 @@ static void ct_collect(SrcFile* f) {
     size_t kept = 0;
     for (size_t i = 0; i < f->ast->blockstmt_size; i++) {
         Expr* e = f->ast->blockstmt[i];
+        int typedefs = e->kind == E_DECLGROUP && (e->flags & F_TYPEDEF);
         int at = e->kind == E_FUNCDEF && *e->name.start == '@';
-        int variables = e->kind == E_DECLGROUP && ct_spec(e->type) && !(e->flags & F_TYPEDEF);
+        int variables = e->kind == E_DECLGROUP && ct_spec(e->type) && !typedefs;
         // an '@' function that is declared ahead of its definition
-        int ahead = e->kind == E_DECLGROUP && e->blockstmt_size && *e->blockstmt[0]->name.start == '@' && !(e->flags & F_TYPEDEF);
+        int ahead = e->kind == E_DECLGROUP && e->blockstmt_size && *e->blockstmt[0]->name.start == '@' && !typedefs;
         // an impl or a trait with control among its members is declared when that can be carried out
         int controlled = (e->kind == E_IMPL || e->kind == E_TRAIT) && ct_controlled(e);
         if (!at && !variables && !ahead && !controlled && e->kind != E_GENERATOR) f->ast->blockstmt[kept++] = e;
-        if (controlled) list_push(&ct_controls, e), list_push(&ct_controls, f);
-        for (size_t k = 0; (e->kind == E_IMPL || e->kind == E_TRAIT) && k < e->blockstmt_size; k++)
-            if (e->blockstmt[k]->name.length && *e->blockstmt[k]->name.start == '@' && !ct_spliced(e->blockstmt[k]->name))
-                fatal(f->path, e->blockstmt[k]->name, "an '@' function cannot be a method or a trait member");
-        if (e->kind == E_DECLGROUP && (e->flags & F_TYPEDEF) && e->blockstmt_size && *e->blockstmt[0]->name.start == '@')
-            list_push(&ct_types, e), list_push(&ct_types, f);
+        if (controlled) {
+            list_push(&ct_controls, e);
+            list_push(&ct_controls, f);
+        }
+        if (e->kind == E_IMPL || e->kind == E_TRAIT) ct_check_methods(f, e);
+        if (typedefs && e->blockstmt_size && *e->blockstmt[0]->name.start == '@') {
+            list_push(&ct_types, e);
+            list_push(&ct_types, f);
+        }
         if (e->kind == E_GENERATOR) ct_start(f, e);
         for (size_t k = 0; variables && k < e->blockstmt_size; k++) {
             CtGlobal* g = (CtGlobal*)xalloc(sizeof(CtGlobal));
@@ -1802,13 +2771,27 @@ static void ct_collect(SrcFile* f) {
             map_put(&ct_globals, xstrf("%s\x01%s", f->mod->name, tok_str(g->decl->name)), g);
         }
         if (e->kind != E_FUNCDEF || !e->right) continue;
-        Expr* signature = decl_function_type(e->type);
-        for (size_t k = 0; !at && k < signature->blockstmt_size; k++)
-            if (ct_spec(type_syntax_root(signature->blockstmt[k]->type)))
-                fatal(f->path, e->name, "a compile-time variable cannot be a parameter of an ordinary function; a constant generic parameter does that");
+        if (!at) ct_check_parameters(f, e);
         if (at) ct_function(f, e);
     }
     f->ast->blockstmt_size = kept;
+}
+
+// An '@' function cannot be a method or a trait member
+static void ct_check_methods(SrcFile* f, Expr* e) {
+    for (size_t k = 0; k < e->blockstmt_size; k++) {
+        Token name = e->blockstmt[k]->name;
+        if (name.length && *name.start == '@' && !ct_spliced(name))
+            fatal(f->path, name, "an '@' function cannot be a method or a trait member");
+    }
+}
+
+// An ordinary function cannot have a compile-time variable as a parameter
+static void ct_check_parameters(SrcFile* f, Expr* e) {
+    Expr* signature = decl_function_type(e->type);
+    for (size_t k = 0; k < signature->blockstmt_size; k++)
+        if (ct_spec(type_syntax_root(signature->blockstmt[k]->type)))
+            fatal(f->path, e->name, "a compile-time variable cannot be a parameter of an ordinary function; a constant generic parameter does that");
 }
 
 // ---------------------------------------------------------------------------
@@ -1826,13 +2809,28 @@ typedef struct {
 
 static Map ct_emitted;          // an '@emit' and the '@' call that carried it out -> CtEmitted*
 static Token ct_at_emit;        // the '@emit' that is being carried out
-static void* ct_running_task(void);
 static int ct_late;             // the program is being checked already: what is declared now is checked at once
+static Map ct_call_statics;     // an '@' call -> List* of the `static` things it emitted, which its later items see
 
+static Expr* ct_copy(Expr* e, Map* seen);
+static Local* ct_capture(Ctx* c, Token at);
+static SrcFile* ct_file(Ctx* c, Token at, SrcFile* like);
+static void ct_expand(Ctx* c, Expr* m, Expr* into, SrcFile* file, List* files);
+static void ct_expand_member(Ctx* c, Expr* m, Expr* into, SrcFile* file, List* files);
+static int ct_controlled(Expr* owner);
+static Expr* resolve_ct_members(Ctx* c, Type* t);
+static Expr* ct_flatten(Ctx* c, Expr* owner, SrcFile* file, List* files);
+static void ct_declare(Ctx* c, SrcFile* file, Expr* item);
+static void ct_check_late(Module* mod, size_t names, size_t impls);
+static void ct_emit(Ctx* c, Expr* s);
+static Expr* ct_emitted_item(Ctx* c, Expr* emitted);
+static SrcFile* ct_emit_file(Ctx* c, Token at);
+
+// From the sections below
+static void* ct_running_task(void);
 static int ct_holds(Ctx* c, Expr* e);
 static void gen_ct_decl(Ctx* c, Expr* g);
 static void ct_settled(Ctx* c, Token at, Impl* im);
-static Map ct_call_statics;     // an '@' call -> List* of the `static` things it emitted, which its later items see
 
 // Returns a copy of a piece of syntax. What the compiler noted in it for one
 // declaration is left out, so that it can be declared again. A part that is
@@ -1876,13 +2874,14 @@ static Local* ct_capture(Ctx* c, Token at) {
     for (TEnv* e = c->tenv; e; e = e->next) {
         // a type argument is a type name, and a constant one a variable
         Type* k = type_unq(e->type);
-        Local* copy = (Local*)xalloc(sizeof(Local));
-        Word value = 0;
-        *copy = (Local){ L_TYPEDEF, e->name, e->type, NULL, NULL };
         if (k->kind == TY_CONST && !k->has_value) continue;
+        Local* copy = (Local*)xalloc(sizeof(Local));
         if (k->kind == TY_CONST) {
+            Word value = 0;
             ct_store(&value, ct_kind(k->base), k->value);
             *copy = (Local){ L_VAR, e->name, type_qual(k->base, Q_COMPTIME), (char*)ct_keep(&value, sizeof value), NULL };
+        } else {
+            *copy = (Local){ L_TYPEDEF, e->name, e->type, NULL, NULL };
         }
         *link = copy;
         link = &copy->next;
@@ -1910,10 +2909,11 @@ static void ct_expand(Ctx* c, Expr* m, Expr* into, SrcFile* file, List* files) {
     long top = ct_top;
     int passes = 0;
     Condition* f = m->case_size ? &m->cases[m->case_size - 1] : NULL;
-    Expr* copy = (Expr*)xalloc(sizeof(Expr));
-    *copy = *m;
-    if (f && m->kind == E_FOR && f->base_case && f->base_case->kind == E_DECLGROUP) ct_expand(c, f->base_case, into, file, files);
-    else if (f && m->kind == E_FOR && f->base_case) ct_value(c, f->base_case);
+    if (f && m->kind == E_FOR && f->base_case) {
+        // the first clause of a `for`: a declaration of its variables, or an expression
+        if (f->base_case->kind == E_DECLGROUP) ct_expand(c, f->base_case, into, file, files);
+        else ct_value(c, f->base_case);
+    }
     if (f && !g_ct.running && (!f->condition || !ct_known(c, f->condition))) FAIL(c, m->token, "%s", rule);
     switch (m->kind) {
         case E_LIST:
@@ -1934,21 +2934,28 @@ static void ct_expand(Ctx* c, Expr* m, Expr* into, SrcFile* file, List* files) {
                 if (f->increment) ct_value(c, f->increment);
             }
             break;
-        case E_FIELD:
-            if (m->type) {
-                copy->type = expr_new(E_CT_TYPE, m->type->token, NULL, NULL);
-                copy->type->sema = resolve_type(c, m->type);
-            }
-            // fall through
         default:
-            if (ct_spliced(m->name)) copy->name = ct_ident(c, m->name);
-            if (ct_spliced(m->token)) copy->token = copy->name;
-            if (m->kind == E_FUNCDEF && files) list_push(files, ct_file(c, m->token, file));
-            expr_push(into, copy);
+            ct_expand_member(c, m, into, file, files);
             break;
     }
     c->locals = scope;
     ct_top = top;
+}
+
+// A member that the control reached: it is added to `into` under the name it
+// has now, a field with the type it has now, and for a method the file in
+// which its body can use what can be used now is added to `files`
+static void ct_expand_member(Ctx* c, Expr* m, Expr* into, SrcFile* file, List* files) {
+    Expr* copy = (Expr*)xalloc(sizeof(Expr));
+    *copy = *m;
+    if (m->kind == E_FIELD && m->type) {
+        copy->type = expr_new(E_CT_TYPE, m->type->token, NULL, NULL);
+        copy->type->sema = resolve_type(c, m->type);
+    }
+    if (ct_spliced(m->name)) copy->name = ct_ident(c, m->name);
+    if (ct_spliced(m->token)) copy->token = copy->name;
+    if (m->kind == E_FUNCDEF && files) list_push(files, ct_file(c, m->token, file));
+    expr_push(into, copy);
 }
 
 // Returns whether compile-time control or a made name stands among some members.
@@ -1965,13 +2972,20 @@ static Expr* resolve_ct_members(Ctx* c, Type* t) {
     Expr* body = t->body;
     if (ct_quiet || ct_running_task()) list_push(&ct_resolving, t);
     if (!ct_controlled(body)) return body;
+    return ct_flatten(c, body, c->file, NULL);
+}
+
+// A copy of something with members, with the compile-time control among them
+// carried out
+static Expr* ct_flatten(Ctx* c, Expr* owner, SrcFile* file, List* files) {
     Local* scope = c->locals;
     long top = ct_top;
     Expr* flat = (Expr*)xalloc(sizeof(Expr));
-    *flat = *body;
+    *flat = *owner;
     flat->blockstmt = NULL;
-    flat->blockstmt_size = flat->alloc_blockstmt_size = 0;
-    for (size_t i = 0; i < body->blockstmt_size; i++) ct_expand(c, body->blockstmt[i], flat, c->file, NULL);
+    flat->blockstmt_size = 0;
+    flat->alloc_blockstmt_size = 0;
+    for (size_t i = 0; i < owner->blockstmt_size; i++) ct_expand(c, owner->blockstmt[i], flat, file, files);
     c->locals = scope;
     ct_top = top;
     return flat;
@@ -1981,32 +2995,30 @@ static Expr* resolve_ct_members(Ctx* c, Type* t) {
 // among the members of an impl or a trait is carried out first.
 static void ct_declare(Ctx* c, SrcFile* file, Expr* item) {
     Module* mod = file->mod;
-    size_t names = mod->names.len, impls = g_impls.len;
+    size_t names = mod->names.len;
+    size_t impls = g_impls.len;
     List files = {0};
     if (item->kind == E_FUNCDEF && *item->name.start == '@') {
         ct_function(file, item);
         return;
     }
-    if (item->kind == E_IMPL || item->kind == E_TRAIT) {
-        Local* scope = c->locals;
-        long top = ct_top;
-        Expr* flat = (Expr*)xalloc(sizeof(Expr));
-        *flat = *item;
-        flat->blockstmt = NULL;
-        flat->blockstmt_size = flat->alloc_blockstmt_size = 0;
-        for (size_t i = 0; i < item->blockstmt_size; i++) ct_expand(c, item->blockstmt[i], flat, file, &files);
-        c->locals = scope;
-        ct_top = top;
-        item = flat;
-    }
+    if (item->kind == E_IMPL || item->kind == E_TRAIT) item = ct_flatten(c, item, file, &files);
     declare_one(file, item);
     if (item->kind == E_IMPL) {
         // each method goes on using what could be used where the control reached it
         Impl* im = (Impl*)g_impls.items[g_impls.len - 1];
-        for (size_t i = 0; i < im->methods.len; i++) ((Func*)im->methods.items[i])->file = (SrcFile*)files.items[i];
+        for (size_t i = 0; i < im->methods.len; i++) {
+            Func* method = (Func*)im->methods.items[i];
+            method->file = (SrcFile*)files.items[i];
+        }
         ct_settled(c, ct_at_emit.length ? ct_at_emit : item->token, im);
     }
-    if (!ct_late) return;
+    if (ct_late) ct_check_late(mod, names, impls);
+}
+
+// The program is being checked already: what was just declared, the names from
+// `names` on and the impls from `impls` on, is checked at once
+static void ct_check_late(Module* mod, size_t names, size_t impls) {
     for (size_t i = impls; i < g_impls.len; i++) {
         Impl* im = (Impl*)g_impls.items[i];
         Ctx ic = ctx_for_file(im->file);
@@ -2025,8 +3037,8 @@ static void ct_declare(Ctx* c, SrcFile* file, Expr* item) {
 // written the item has only what the function brings: what its body imports
 // and includes, and its variables and generic arguments as they are now.
 static void ct_emit(Ctx* c, Expr* s) {
-    const char* id = xstrf("%p %s", (void*)s, g_ct.call ? g_ct.call : "");
-    Map seen = {0};
+    const char* call = g_ct.call ? g_ct.call : "";
+    const char* id = xstrf("%p %s", (void*)s, call);
     if (*g_ct.running->name != '@') FAIL(c, s->token, "'@emit' is only allowed in the body of an '@' function");
     CtEmitted* emitted = (CtEmitted*)map_get(&ct_emitted, id);
     if (emitted) emitted->unseen = 0;
@@ -2034,31 +3046,53 @@ static void ct_emit(Ctx* c, Expr* s) {
     emitted = (CtEmitted*)xalloc(sizeof(CtEmitted));
     emitted->task = ct_running_task();
     map_put(&ct_emitted, id, emitted);
-    Expr* item = ct_copy(s->left, &seen);
-    for (int i = 0; i < generics_count(item->generics); i++)
-        for (int k = 0; k < generics_count(g_ct.running->generics); k++)
-            if (token_same(item->generics->blockstmt[i]->name, g_ct.running->generics->blockstmt[k]->name))
-                FAIL(c, item->generics->blockstmt[i]->name, "an emitted item cannot reuse '%s', the name of a generic parameter of the '@' function that emits it",
-                     tok_str(item->generics->blockstmt[i]->name));
+    Expr* item = ct_emitted_item(c, s->left);
+    SrcFile* file = ct_emit_file(c, s->token);
+
+    // what this call emitted before as `static` can be used by what it emits now
+    List* statics = (List*)map_get(&ct_call_statics, call);
+    if (!statics) {
+        statics = (List*)xalloc(sizeof(List));
+        map_put(&ct_call_statics, call, statics);
+    }
+    for (size_t i = 0; i < g_ct.use->statics.len; i++) map_put(&file->statics, g_ct.use->statics.keys[i], g_ct.use->statics.vals[i]);
+    for (size_t i = 0; i < statics->len; i++) map_put(&file->statics, ((Entity*)statics->items[i])->name, statics->items[i]);
+    size_t impls = g_impls.len;
+    size_t before = file->statics.len;
+    ct_at_emit = s->token;
+    ct_declare(c, file, item);
+    if (item->kind == E_IMPL && g_impls.len > impls) emitted->impl = (Impl*)g_impls.items[impls];
+    for (size_t i = before; i < file->statics.len; i++) list_push(statics, file->statics.vals[i]);
+}
+
+// A copy of what an '@emit' emits, with the names it makes made
+static Expr* ct_emitted_item(Ctx* c, Expr* emitted) {
+    Map seen = {0};
+    Expr* item = ct_copy(emitted, &seen);
+    Expr* outer = g_ct.running->generics;
+    for (int i = 0; i < generics_count(item->generics); i++) {
+        Token name = item->generics->blockstmt[i]->name;
+        for (int k = 0; k < generics_count(outer); k++)
+            if (token_same(name, outer->blockstmt[k]->name))
+                FAIL(c, name, "an emitted item cannot reuse '%s', the name of a generic parameter of the '@' function that emits it",
+                     tok_str(name));
+    }
     if (ct_spliced(item->name)) item->name = ct_ident(c, item->name);
     if (ct_spliced(item->token)) item->token = item->name;
     for (size_t i = 0; item->kind == E_DECLGROUP && i < item->blockstmt_size; i++)
         if (ct_spliced(item->blockstmt[i]->name)) item->blockstmt[i]->name = ct_ident(c, item->blockstmt[i]->name);
     if (item->kind == E_DECLGROUP && item->type && ct_spliced(item->type->name)) item->type->name = ct_ident(c, item->type->name);
+    return item;
+}
 
-    SrcFile* file = ct_file(c, s->token, (SrcFile*)map_get(&ct_brings, xstrf("%p", (void*)g_ct.running)));
+// The file an emitted item is declared in: in the namespace that the '@'
+// function is used from, with what the function brings
+static SrcFile* ct_emit_file(Ctx* c, Token at) {
+    SrcFile* file = ct_file(c, at, (SrcFile*)map_get(&ct_brings, xstrf("%p", (void*)g_ct.running)));
     file->mod = g_ct.use->mod;
     if (file->includes.len) file->cunit = cunit_for_file(file);
     list_push(&file->mod->files, file);
-    List* statics = (List*)map_get(&ct_call_statics, g_ct.call ? g_ct.call : "");
-    if (!statics) map_put(&ct_call_statics, g_ct.call ? g_ct.call : "", statics = (List*)xalloc(sizeof(List)));
-    for (size_t i = 0; i < g_ct.use->statics.len; i++) map_put(&file->statics, g_ct.use->statics.keys[i], g_ct.use->statics.vals[i]);
-    for (size_t i = 0; i < statics->len; i++) map_put(&file->statics, ((Entity*)statics->items[i])->name, statics->items[i]);
-    size_t impls = g_impls.len, before = file->statics.len;
-    ct_at_emit = s->token;
-    ct_declare(c, file, item);
-    if (item->kind == E_IMPL && g_impls.len > impls) emitted->impl = (Impl*)g_impls.items[impls];
-    for (size_t i = before; i < file->statics.len; i++) list_push(statics, file->statics.vals[i]);
+    return file;
 }
 
 // ---------------------------------------------------------------------------
@@ -2098,14 +3132,39 @@ typedef struct {
     Entity* trait;
     Token at;
     SrcFile* file;
-} CtNo;
+} CtUnimplemented;
+
+// An implementation that made something implemented after it was settled as
+// unimplemented for someone else, reported when the generators have run
+typedef struct {
+    SrcFile* file;
+    Token at;
+    const char* message;
+} CtConflict;
+
+static void* ct_running_task(void);
+static void ct_start(SrcFile* f, Expr* start);
+static int ct_implements(Ctx* c, Token at, Type* type, Expr* bound);
+static void ct_settled(Ctx* c, Token at, Impl* im);
+static void ct_add_conflict(CtConflict* conflict);
+static void ct_unresolve(void);
+static int ct_attempt(CtTask* t);
+static void ct_spawn_from(CtStart* d);
+static void ct_spawn_pattern(CtStart* d);
+static void ct_schedule(void);
+static void ct_declare_controlled(void);
+static void ct_declare_types(void);
+static void ct_run_generators(void);
+static void ct_report_conflicts(void);
+static int gen_ct_function(FuncInst* fi);
+static int ct_more(void);
+static void ct_collect_program(void);
 
 static List ct_deferred;        // CtStart*
 static List ct_tasks;           // CtTask*
-static List ct_nos;             // CtNo*
+static List ct_unimplemented;   // CtUnimplemented*
 static Map ct_spawned;          // a deferred start and an instance -> the task
 static CtTask* ct_task;         // the generator that is being run
-typedef struct { SrcFile* file; Token at; const char* message; } CtConflict;
 static List ct_conflicts;       // CtConflict*, in source order
 static Expr* ct_trying;         // the statement that is being tried by itself
 static int ct_missed;           // statements of the body being tried that did not get through
@@ -2147,9 +3206,12 @@ static int ct_implements(Ctx* c, Token at, Type* type, Expr* bound) {
     if (found) return 1;
     buf_printf(&what, "%p ", (void*)trait);
     type_key_into(&what, type);
-    for (size_t i = 0; i < ct_nos.len; i++) {
-        CtNo* no = (CtNo*)ct_nos.items[i];
-        if (no->task == ct_task && strcmp(no->what, buf_str(&what)) == 0) return ct_soft = 1, 0;
+    for (size_t i = 0; i < ct_unimplemented.len; i++) {
+        CtUnimplemented* settled = (CtUnimplemented*)ct_unimplemented.items[i];
+        if (settled->task == ct_task && strcmp(settled->what, buf_str(&what)) == 0) {
+            ct_soft = 1;
+            return 0;
+        }
     }
     if (ct_task) {
         ct_task->waits = buf_str(&what);
@@ -2160,9 +3222,9 @@ static int ct_implements(Ctx* c, Token at, Type* type, Expr* bound) {
         longjmp(*ct_wait, 1);
     }
     if (ct_quiet && !ct_answer) FAIL(c, at, "this waits for a generator");
-    CtNo* no = (CtNo*)xalloc(sizeof(CtNo));
-    *no = (CtNo){ NULL, buf_str(&what), type, trait, at, c->file };
-    list_push(&ct_nos, no);
+    CtUnimplemented* settled = (CtUnimplemented*)xalloc(sizeof(CtUnimplemented));
+    *settled = (CtUnimplemented){ NULL, buf_str(&what), type, trait, at, c->file };
+    list_push(&ct_unimplemented, settled);
     ct_soft = 1;
     return 0;
 }
@@ -2171,30 +3233,39 @@ static int ct_implements(Ctx* c, Token at, Type* type, Expr* bound) {
 // that was settled as unimplemented for someone else, that is an error.
 static void ct_settled(Ctx* c, Token at, Impl* im) {
     impl_prepare(im);
-    for (size_t i = 0; i < ct_nos.len; i++) {
-        CtNo* no = (CtNo*)ct_nos.items[i];
+    for (size_t i = 0; i < ct_unimplemented.len; i++) {
+        CtUnimplemented* settled = (CtUnimplemented*)ct_unimplemented.items[i];
         Bind b = {0};
-        if (no->task == ct_task || im->trait != no->trait || !impl_match(im, no->type, &b)) continue;
-        // all of these are reported, in source order, when the generators have run
+        if (settled->task == ct_task || im->trait != settled->trait || !impl_match(im, settled->type, &b)) continue;
         CtConflict* conflict = (CtConflict*)xalloc(sizeof(CtConflict));
-        size_t place = ct_conflicts.len;
-        *conflict = (CtConflict){ c->file, at, xstrf("this makes '%s' implement '%s', which was already settled as unimplemented for the code at %s:%zu",
-                                                      type_show(no->type), no->trait->name, no->file->path, no->at.row) };
-        list_push(&ct_conflicts, conflict);
-        for (; place > 0; place--) {
-            CtConflict* earlier = (CtConflict*)ct_conflicts.items[place - 1];
-            if (earlier->at.row < at.row || (earlier->at.row == at.row && earlier->at.col <= at.col)) break;
-            ct_conflicts.items[place] = earlier;
-        }
-        ct_conflicts.items[place] = conflict;
+        const char* message = xstrf("this makes '%s' implement '%s', which was already settled as unimplemented for the code at %s:%zu",
+                                    type_show(settled->type), settled->trait->name, settled->file->path, settled->at.row);
+        *conflict = (CtConflict){ c->file, at, message };
+        ct_add_conflict(conflict);
     }
+}
+
+// Adds a conflict to those that are reported when the generators have run,
+// in source order
+static void ct_add_conflict(CtConflict* conflict) {
+    Token at = conflict->at;
+    size_t place = ct_conflicts.len;
+    list_push(&ct_conflicts, conflict);
+    for (; place > 0; place--) {
+        CtConflict* earlier = (CtConflict*)ct_conflicts.items[place - 1];
+        if (earlier->at.row < at.row || (earlier->at.row == at.row && earlier->at.col <= at.col)) break;
+        ct_conflicts.items[place] = earlier;
+    }
+    ct_conflicts.items[place] = conflict;
 }
 
 // Something that was resolving the members of types did not get through.
 // Those types are resolved again when they are next needed.
 static void ct_unresolve(void) {
-    for (size_t i = 0; i < ct_resolving.len; i++)
-        if (((Type*)ct_resolving.items[i])->state == 1) ((Type*)ct_resolving.items[i])->state = 0;
+    for (size_t i = 0; i < ct_resolving.len; i++) {
+        Type* t = (Type*)ct_resolving.items[i];
+        if (t->state == 1) t->state = 0;
+    }
     ct_resolving.len = 0;
 }
 
@@ -2208,7 +3279,10 @@ static int ct_attempt(CtTask* t) {
     int tries = g_try_depth;
     c.tenv = t->tenv;
     ct_owner = NULL;
-    ct_top = ct_depth = ct_dry = ct_soft = 0;
+    ct_top = 0;
+    ct_depth = 0;
+    ct_dry = 0;
+    ct_soft = 0;
     g_ct = (CtState){ .unrolling = -1, .deciding = -1 };
     ct_task = t;
     ct_wait = &wait;
@@ -2221,11 +3295,14 @@ static int ct_attempt(CtTask* t) {
         g_try_depth = tries;
         g_recover = recover;
         ct_unresolve();
-        for (size_t i = 0; i < ct_emitted.len; i++)
-            if (((CtEmitted*)ct_emitted.vals[i])->task == t) ((CtEmitted*)ct_emitted.vals[i])->unseen = 1;
+        for (size_t i = 0; i < ct_emitted.len; i++) {
+            CtEmitted* item = (CtEmitted*)ct_emitted.vals[i];
+            if (item->task == t) item->unseen = 1;
+        }
     }
     ct_task = NULL;
-    ct_top = ct_depth = 0;
+    ct_top = 0;
+    ct_depth = 0;
     g_ct = (CtState){ .unrolling = -1, .deciding = -1 };
     return t->done || ct_emitted.len != emitted;
 }
@@ -2233,28 +3310,13 @@ static int ct_attempt(CtTask* t) {
 // Starts a generator for each instance of a generic type that a start with
 // `for<...>` is about and that has appeared since this was last done.
 static void ct_spawn_from(CtStart* d) {
+    if (!d->params) ct_spawn_pattern(d);
+    // a start that failed the checks of its first round was reported then
+    if (d->bad) return;
     Expr* g = d->start->generics;
-    Expr* targs = d->start->left->right->generics;
     int n = generics_count(g);
-    Ctx c = ctx_for_file(d->file);
-    if (!d->params) {
-        d->bad = 1;
-        d->params = (Type**)xalloc((size_t)(n + 1) * sizeof(Type*));
-        for (int i = 0; i < n; i++) d->params[i] = param_placeholder(d->file, g->blockstmt[i]);
-        c.tenv = tenv_bind(g, d->params, NULL);
-        for (int k = 0; k < generics_count(targs) && !d->pattern; k++) {
-            Expr* syntax = type_argument(targs->blockstmt[k]);
-            Type* pattern = syntax ? resolve_type(&c, syntax) : NULL;
-            if (pattern && type_unq(pattern)->kind == TY_APP) d->pattern = pattern;
-        }
-        if (!d->pattern) FAIL(&c, d->start->token, "a generator that is started with 'for<...>' needs a generic type with those parameters among its type arguments");
-        for (int i = 0; i < n; i++)
-            if (!type_mentions(d->pattern, d->params[i]))
-                FAIL(&c, g->blockstmt[i]->name, "generic parameter '%s' does not occur in the type arguments of the call", d->params[i]->name);
-        d->bad = 0;
-    }
     Entity* generic = type_unq(d->pattern)->generic;
-    for (size_t i = 0; !d->bad && i < generic->insts.len; i++) {
+    for (size_t i = 0; i < generic->insts.len; i++) {
         Type* inst = (Type*)generic->insts.vals[i];
         const char* key = xstrf("%p %p", (void*)d, (void*)inst);
         Bind b = { .n = n, .params = d->params, .vals = (Type**)xalloc((size_t)(n + 1) * sizeof(Type*)) };
@@ -2268,6 +3330,31 @@ static void ct_spawn_from(CtStart* d) {
     }
 }
 
+// The first round of a start: finds the generic type among the type arguments
+// of its call that the instances are matched against, and checks that it
+// mentions every parameter after `for`. Marks the start bad until that is done.
+static void ct_spawn_pattern(CtStart* d) {
+    Expr* g = d->start->generics;
+    Expr* targs = d->start->left->right->generics;
+    int n = generics_count(g);
+    Ctx c = ctx_for_file(d->file);
+    d->bad = 1;
+    d->params = (Type**)xalloc((size_t)(n + 1) * sizeof(Type*));
+    for (int i = 0; i < n; i++) d->params[i] = param_placeholder(d->file, g->blockstmt[i]);
+    c.tenv = tenv_bind(g, d->params, NULL);
+    for (int k = 0; k < generics_count(targs) && !d->pattern; k++) {
+        Expr* syntax = type_argument(targs->blockstmt[k]);
+        Type* pattern = syntax ? resolve_type(&c, syntax) : NULL;
+        if (pattern && type_unq(pattern)->kind == TY_APP) d->pattern = pattern;
+    }
+    if (!d->pattern)
+        FAIL(&c, d->start->token, "a generator that is started with 'for<...>' needs a generic type with those parameters among its type arguments");
+    for (int i = 0; i < n; i++)
+        if (!type_mentions(d->pattern, d->params[i]))
+            FAIL(&c, g->blockstmt[i]->name, "generic parameter '%s' does not occur in the type arguments of the call", d->params[i]->name);
+    d->bad = 0;
+}
+
 // Runs the generators until none of them can go on. Those that still wait
 // then get their answer, which is that what they wait for is unimplemented,
 // and go on with that.
@@ -2275,28 +3362,50 @@ static void ct_schedule(void) {
     static int scheduling;
     if (scheduling) return;
     scheduling = 1;
+    ct_declare_controlled();
+    ct_declare_types();
+    ct_run_generators();
+    ct_report_conflicts();
+    scheduling = 0;
+}
+
+// Declares the hand-written impls and traits with control among their members
+static void ct_declare_controlled(void) {
     for (size_t i = 0; i < ct_controls.len; i += 2) {
         SrcFile* file = (SrcFile*)ct_controls.items[i + 1];
         Ctx c = ctx_for_file(file);
         RECOVER(ct_declare(&c, file, (Expr*)ct_controls.items[i]));
     }
     ct_controls.len = 0;
+}
+
+// A compile-time type is declared like any type, but stays out of the generated C
+static void ct_declare_types(void) {
     for (size_t i = 0; i < ct_types.len; i += 2) {
-        // a compile-time type is declared like any type, but stays out of the generated C
         Expr* g = (Expr*)ct_types.items[i];
         SrcFile* file = (SrcFile*)ct_types.items[i + 1];
         for (size_t k = 0; k < g->blockstmt_size; k++) {
             const char* name = tok_str(g->blockstmt[k]->name);
             Entity* e = (Entity*)map_get(&file->mod->names, name);
             Entity* plain = (Entity*)map_get(&file->mod->names, name + 1);
-            if (e && e->item) e->item->state = 2, e->item->text = "";
+            if (e && e->item) {
+                e->item->state = 2;
+                e->item->text = "";
+            }
             if (plain && (plain->kind == ENT_TYPEDEF || plain->kind == ENT_GTYPEDEF))
                 RECOVER(fatal(file->path, g->blockstmt[k]->name, "'%s' and '%s' are both declared as types", name + 1, name));
         }
     }
     ct_types.len = 0;
+}
+
+// Runs the generators until none of them can go on. Those that still wait
+// then get their answer, which is that what they wait for is unimplemented,
+// and go on with that.
+static void ct_run_generators(void) {
     for (;;) {
-        int progress = 0, waiting = 0;
+        int progress = 0;
+        int waiting = 0;
         for (size_t i = 0; i < ct_deferred.len; i++) RECOVER(ct_spawn_from((CtStart*)ct_deferred.items[i]));
         for (size_t i = 0; i < ct_tasks.len; i++) {
             CtTask* t = (CtTask*)ct_tasks.items[i];
@@ -2308,18 +3417,21 @@ static void ct_schedule(void) {
         if (!waiting) break;
         for (size_t i = 0; i < ct_tasks.len; i++) {
             CtTask* t = (CtTask*)ct_tasks.items[i];
-            CtNo* no = (CtNo*)xalloc(sizeof(CtNo));
             if (t->done) continue;
-            *no = (CtNo){ t, t->waits, t->wait_type, t->wait_trait, t->wait_at, t->wait_file };
-            list_push(&ct_nos, no);
+            CtUnimplemented* settled = (CtUnimplemented*)xalloc(sizeof(CtUnimplemented));
+            *settled = (CtUnimplemented){ t, t->waits, t->wait_type, t->wait_trait, t->wait_at, t->wait_file };
+            list_push(&ct_unimplemented, settled);
         }
     }
+}
+
+// Reports the conflicts, in source order
+static void ct_report_conflicts(void) {
     for (size_t i = 0; i < ct_conflicts.len; i++) {
         CtConflict* conflict = (CtConflict*)ct_conflicts.items[i];
         RECOVER(fatal(conflict->file->path, conflict->at, "%s", conflict->message));
     }
     ct_conflicts.len = 0;
-    scheduling = 0;
 }
 
 // The checker is about to generate the body of a function. While generators
@@ -2357,15 +3469,27 @@ static int ct_more(void) {
     static size_t emitted;
     ct_late = 1;
     ct_schedule();
-    int progress = ct_emitted.len != emitted, held = ct_held;
+    int progress = ct_emitted.len != emitted;
+    int held = ct_held;
     emitted = ct_emitted.len;
     ct_held = 0;
     // First the bodies that ask whether something exists get their answer,
     // and only when that moves nothing either is what is missing an error.
-    if (progress) return ct_answer = ct_final = 0, 1;
-    if (held && !ct_answer && !ct_final) return ct_answer = 1;
-    if (held && !ct_final) return ct_final = 1;
-    ct_answer = ct_final = 0;
+    if (progress) {
+        ct_answer = 0;
+        ct_final = 0;
+        return 1;
+    }
+    if (held && !ct_answer && !ct_final) {
+        ct_answer = 1;
+        return 1;
+    }
+    if (held && !ct_final) {
+        ct_final = 1;
+        return 1;
+    }
+    ct_answer = 0;
+    ct_final = 0;
     return 0;
 }
 
@@ -2383,6 +3507,31 @@ static void ct_collect_program(void) {
 // ---------------------------------------------------------------------------
 // Where the checker meets compile-time code
 // ---------------------------------------------------------------------------
+
+static void ct_frame(void);
+static CtValue ct_value(Ctx* c, Expr* e);
+static int ct_holds(Ctx* c, Expr* e);
+static int ct_changes(Ctx* c, Expr* e);
+static int ct_written(Ctx* c, Expr* e, Val* out, int braces);
+static int gen_ct_expr(Ctx* c, Expr* e, Val* out);
+static int gen_ct_init(Ctx* c, Expr* e, Type* expected, Val* out);
+static int const_ct_eval(Ctx* c, Expr* e, long long* out);
+static void gen_ct_decl(Ctx* c, Expr* g);
+static void gen_ct_body(Ctx* c, Expr* s, Buf* out, int ind);
+static int gen_ct_stmt(Ctx* c, Expr* s, Buf* out, int ind);
+static int gen_ct_tried(Ctx* c, Expr* s, Buf* out, int ind);
+static int gen_ct_declaration(Ctx* c, Expr* s, int running);
+static int gen_ct_leave(Ctx* c, Expr* s, int running);
+static int gen_ct_return(Ctx* c, Expr* s);
+static int gen_ct_directive(Ctx* c, Expr* s, int running);
+static int gen_ct_run_block(Ctx* c, Expr* s, Buf* out, int ind);
+static int gen_ct_expression(Ctx* c, Expr* s, int running);
+static int gen_ct_control(Ctx* c, Expr* s, Buf* out, int ind, int running);
+static int gen_ct_loop(Ctx* c, Expr* s, Condition* f, int declares, Buf* out, int ind);
+static int gen_ct_switch(Ctx* c, Expr* s, Condition* f, int running, Buf* out, int ind);
+static size_t ct_switch_start(Ctx* c, Expr* body, Word value, int running);
+static int gen_ct_branch(Ctx* c, Expr* s, Condition* f, Buf* out, int ind);
+static void gen_ct_runtime(Ctx* c, Expr* s, int loop, Buf* out, int ind);
 
 // The compile-time variables of a function body live as long as the checker
 // is generating that body. A new body starts with none.
@@ -2409,6 +3558,7 @@ static CtValue ct_value(Ctx* c, Expr* e) {
 static int ct_holds(Ctx* c, Expr* e) {
     if (!e) return 1;
     CtValue value = ct_value(c, e);
+    if (ct_complex(value.type)) return ct_convert(c, e->token, value, type_builtin(BK_BOOL)) != 0;
     if (!ct_kind(value.type)) FAIL(c, e->token, "a condition is needed here, and this is a value of type '%s'", type_show(value.type));
     return ct_kind(value.type) & CT_FLOAT ? ct_double(value.v) != 0 : value.v != 0;
 }
@@ -2417,7 +3567,9 @@ static int ct_holds(Ctx* c, Expr* e) {
 static int ct_changes(Ctx* c, Expr* e) {
     if (!e) return 0;
     int steps = (e->kind == E_UNARY || e->kind == E_POSTFIX) && (token_is(e->token, "++") || token_is(e->token, "--"));
-    if ((steps || ct_assigns(e)) && e->left->kind == E_IDENT && e->left->token.kind == TK_IDENT && ct_local(c, e->left->token)) return 1;
+    if ((steps || ct_assigns(e)) && e->left->kind == E_IDENT && e->left->token.kind == TK_IDENT) {
+        if (ct_local(c, e->left->token)) return 1;
+    }
     if (ct_changes(c, e->left) || ct_changes(c, e->right)) return 1;
     for (size_t i = 0; i < e->case_size; i++)
         if (ct_changes(c, e->cases[i].condition) || ct_changes(c, e->cases[i].block)) return 1;
@@ -2431,8 +3583,11 @@ static int ct_written(Ctx* c, Expr* e, Val* out, int braces) {
     if (ct_known(c, e) != 2) return 0;
     CtValue value = ct_value(c, e);
     void* address = (void*)(intptr_t)value.v;
-    // a number is put in memory to be read as its type
-    if (ct_kind(value.type)) ct_store(address = &number, ct_kind(value.type), value.v);
+    if (ct_kind(value.type)) {
+        // a number is put in memory to be read as its type
+        address = &number;
+        ct_store(address, ct_kind(value.type), value.v);
+    }
     *out = val(ct_text(c, e->token, value.type, address, braces), type_unq(value.type));
     return 1;
 }
@@ -2441,14 +3596,18 @@ static int ct_written(Ctx* c, Expr* e, Val* out, int braces) {
 // compile-time values, it is evaluated, and its value is what the checker
 // writes. Returns whether that was so.
 static int gen_ct_expr(Ctx* c, Expr* e, Val* out) {
+    Expr* named = ct_named(c, e);
+    if (named != e) {
+        *out = gen_expr(c, named, NULL);
+        return 1;
+    }
+    if (ct_written(c, e, out, 0)) return 1;
     // The right operand of && and ||, and the two results of ?:, are only
     // evaluated if a runtime value says so: nothing may change there.
     int guarded = e->kind == E_BINARY && (token_is(e->token, "&&") || token_is(e->token, "||"));
-    Expr* named = ct_named(c, e);
-    if (named != e) return *out = gen_expr(c, named, NULL), 1;
-    if (ct_written(c, e, out, 0)) return 1;
-    if ((guarded && ct_changes(c, e->right)) ||
-        (e->kind == E_TERNARY && (ct_changes(c, e->cases[1].block) || ct_changes(c, e->cases[0].block))))
+    int changes_guarded = guarded && ct_changes(c, e->right);
+    int changes_result = e->kind == E_TERNARY && (ct_changes(c, e->cases[1].block) || ct_changes(c, e->cases[0].block));
+    if (changes_guarded || changes_result)
         FAIL(c, e->token, "a compile-time variable cannot change in a part of an expression that is decided at runtime");
     return 0;
 }
@@ -2463,9 +3622,10 @@ static int gen_ct_init(Ctx* c, Expr* e, Type* expected, Val* out) {
         Expr* item = e->blockstmt[i];
         if (item->kind != E_INIT_ITEM || !item->left->aux) continue;
         if (!list) {
+            size_t bytes = e->blockstmt_size * sizeof(Expr*);
             list = (Expr*)xalloc(sizeof(Expr));
             *list = *e;
-            list->blockstmt = (Expr**)memcpy(xalloc(e->blockstmt_size * sizeof(Expr*)), e->blockstmt, e->blockstmt_size * sizeof(Expr*));
+            list->blockstmt = (Expr**)memcpy(xalloc(bytes), e->blockstmt, bytes);
         }
         Expr* designator = (Expr*)memcpy(xalloc(sizeof(Expr)), item->left, sizeof(Expr));
         designator->name = ct_field_member(c, item->left->left);
@@ -2474,7 +3634,10 @@ static int gen_ct_init(Ctx* c, Expr* e, Type* expected, Val* out) {
         list->blockstmt[i] = (Expr*)memcpy(xalloc(sizeof(Expr)), item, sizeof(Expr));
         list->blockstmt[i]->left = designator;
     }
-    if (list) return *out = gen_init(c, list, expected), 1;
+    if (list) {
+        *out = gen_init(c, list, expected);
+        return 1;
+    }
     return e->kind != E_INIT_LIST && ct_written(c, e, out, kind == TY_STRUCT || kind == TY_ARRAY);
 }
 
@@ -2516,7 +3679,8 @@ static void gen_ct_body(Ctx* c, Expr* s, Buf* out, int ind) {
         gen_stmt(c, s, out, ind);
     } else if (s->kind != E_BLOCK || declares) {
         // a block that a compile-time `continue` emptied leaves nothing
-        Buf body = {0}, empty = {0};
+        Buf body = {0};
+        Buf empty = {0};
         gen_stmt(c, s, &body, ind);
         buf_indent(&empty, ind);
         buf_puts(&empty, "{\n");
@@ -2546,94 +3710,124 @@ static int gen_ct_stmt(Ctx* c, Expr* s, Buf* out, int ind) {
         g_ct_pass = NULL;
         return 0;
     }
-    if (ct_quiet && !g_ct.running && s != ct_trying) {
-        // While a body is tried, each statement is tried by itself, so that
-        // one that misses something does not keep the rest from being seen.
-        jmp_buf attempt;
-        jmp_buf* outer = g_ct_quiet;
-        CtState state = g_ct;
-        int depth = g_try_depth;
-        g_ct_quiet = &attempt;
-        ct_trying = s;
-        if (setjmp(attempt) == 0) {
-            gen_stmt(c, s, out, ind);
-        } else {
-            ct_missed++;
-            g_ct = state;
-            g_ct_pass = NULL;
-        }
-        ct_trying = NULL;
-        g_ct_quiet = outer;
-        g_try_depth = depth;
-        return 1;
-    }
+    if (ct_quiet && !g_ct.running && s != ct_trying) return gen_ct_tried(c, s, out, ind);
     ct_trying = NULL;
     ct_frame();
+    int running = g_ct.running != NULL;
+    int control = s->kind == E_WHILE || s->kind == E_DOWHILE || s->kind == E_FOR || s->kind == E_IF || s->kind == E_SWITCH;
+    if (s->kind == E_DECLGROUP) return gen_ct_declaration(c, s, running);
+    if (s->kind == E_BREAK || s->kind == E_CONTINUE) return gen_ct_leave(c, s, running);
+    if (running && s->kind == E_RETURN) return gen_ct_return(c, s);
+    if (s->kind == E_IMPORT || s->kind == E_EMIT || (running && s->kind == E_INCLUDE)) return gen_ct_directive(c, s, running);
+    if (running && (s->kind == E_BLOCK || s->kind == E_ALL)) return gen_ct_run_block(c, s, out, ind);
+    if (!control) return gen_ct_expression(c, s, running);
+    return gen_ct_control(c, s, out, ind, running);
+}
+
+// While a body is tried, each statement is tried by itself, so that one that
+// misses something does not keep the rest from being seen
+static int gen_ct_tried(Ctx* c, Expr* s, Buf* out, int ind) {
+    jmp_buf attempt;
+    jmp_buf* outer = g_ct_quiet;
+    CtState state = g_ct;
+    int depth = g_try_depth;
+    g_ct_quiet = &attempt;
+    ct_trying = s;
+    if (setjmp(attempt) == 0) {
+        gen_stmt(c, s, out, ind);
+    } else {
+        ct_missed++;
+        g_ct = state;
+        g_ct_pass = NULL;
+    }
+    ct_trying = NULL;
+    g_ct_quiet = outer;
+    g_try_depth = depth;
+    return 1;
+}
+
+// A declaration: of compile-time variables, or of anything in a function that is being run
+static int gen_ct_declaration(Ctx* c, Expr* s, int running) {
+    if (s->flags & F_TYPEDEF) {
+        // a type that a function being run declares is declared as in any function
+        if (running) {
+            Buf unused = {0};
+            g_ct_pass = s;
+            gen_stmt(c, s, &unused, 0);
+        }
+        return running;
+    }
+    if (!running && !ct_spec(s->type)) return 0;
+    gen_ct_decl(c, s);
+    return 1;
+}
+
+// A `break` leaves the switch being decided, or else the loop being run, as `continue` does
+static int gen_ct_leave(Ctx* c, Expr* s, int running) {
+    int decided = s->kind == E_BREAK && g_ct.deciding >= 0;
+    int level = decided ? g_ct.deciding : g_ct.unrolling;
+    if (level < 0 || (g_ct.in_switch && s->kind == E_BREAK && !decided)) {
+        if (running) FAIL(c, s->token, "'%s' has no loop to leave here", tok_str(s->token));
+        return 0;
+    }
+    if (g_ct.runtime > level)
+        FAIL(c, s->token, "'%s' is decided at runtime here, but it would leave code that is run at compile time", tok_str(s->token));
+    g_ct.flow = s->kind == E_BREAK ? CT_BREAK : CT_CONTINUE;
+    return 1;
+}
+
+// A `return` of a function that is being run. A struct that is returned
+// outlives the variables of the call.
+static int gen_ct_return(Ctx* c, Expr* s) {
+    long top = ct_top;
+    Type* type = g_ct.ret;
+    if (s->left) {
+        long size = ct_size(c, s->token, type);
+        char* address = ct_at(ct_room(c, s->token, size));
+        ct_init(c, address, type, s->left);
+        ct_result = ct_read(c, s->token, address, type);
+        if (!ct_kind(type)) ct_result.v = (Word)(intptr_t)ct_keep(address, (size_t)size);
+    }
+    ct_top = top;
+    g_ct.flow = CT_RETURN;
+    return 1;
+}
+
+// An import, an '@emit', or an include of an '@' function. What the body
+// imports and includes was taken up when its function was noted.
+static int gen_ct_directive(Ctx* c, Expr* s, int running) {
+    if (!running) FAIL(c, s->token, "'%s' is only allowed in the body of an '@' function", s->kind == E_EMIT ? "@emit" : "import");
+    if (s->kind == E_EMIT) ct_emit(c, s);
+    return 1;
+}
+
+// A block, or an empty statement, of a function that is being run
+static int gen_ct_run_block(Ctx* c, Expr* s, Buf* out, int ind) {
+    Local* scope = c->locals;
+    long top = ct_top;
+    for (size_t i = 0; s->kind == E_BLOCK && i < s->blockstmt_size; i++) gen_stmt(c, s->blockstmt[i], out, ind);
+    c->locals = scope;
+    ct_top = top;
+    return 1;
+}
+
+// A statement that only works with compile-time values leaves nothing behind
+static int gen_ct_expression(Ctx* c, Expr* s, int running) {
+    long top = ct_top;
+    if (!running && ct_known(c, s) != 2) return 0;
+    ct_eval(c, s);
+    ct_top = top;
+    return 1;
+}
+
+// A branch, loop or switch: carried out at compile time when its condition is
+// a compile-time value, else left to the checker
+static int gen_ct_control(Ctx* c, Expr* s, Buf* out, int ind, int running) {
     CtState outer = g_ct;
     Local* scope = c->locals;
     long top = ct_top;
-    int running = g_ct.running != NULL;
     int loop = s->kind == E_WHILE || s->kind == E_DOWHILE || s->kind == E_FOR;
-    int control = loop || s->kind == E_IF || s->kind == E_SWITCH;
-    Condition* f = control ? &s->cases[s->case_size - 1] : NULL;
-
-    if (s->kind == E_DECLGROUP) {
-        if (s->flags & F_TYPEDEF) {
-            // a type that a function being run declares is declared as in any function
-            Buf unused = {0};
-            if (running) g_ct_pass = s, gen_stmt(c, s, &unused, 0);
-            return running;
-        }
-        if (!running && !ct_spec(s->type)) return 0;
-        gen_ct_decl(c, s);
-        return 1;
-    }
-    if (s->kind == E_BREAK || s->kind == E_CONTINUE) {
-        // a `break` leaves the switch being decided, or else the loop being run, as `continue` does
-        int decided = s->kind == E_BREAK && g_ct.deciding >= 0;
-        int level = decided ? g_ct.deciding : g_ct.unrolling;
-        if (level < 0 || (g_ct.in_switch && s->kind == E_BREAK && !decided)) {
-            if (running) FAIL(c, s->token, "'%s' has no loop to leave here", tok_str(s->token));
-            return 0;
-        }
-        if (g_ct.runtime > level)
-            FAIL(c, s->token, "'%s' is decided at runtime here, but it would leave code that is run at compile time", tok_str(s->token));
-        g_ct.flow = s->kind == E_BREAK ? CT_BREAK : CT_CONTINUE;
-        return 1;
-    }
-    if (running && s->kind == E_RETURN) {
-        // a struct that is returned outlives the variables of the call
-        Type* type = g_ct.ret;
-        if (s->left) {
-            long size = ct_size(c, s->token, type);
-            char* address = ct_at(ct_room(c, s->token, size));
-            ct_init(c, address, type, s->left);
-            ct_result = ct_read(c, s->token, address, type);
-            if (!ct_kind(type)) ct_result.v = (Word)(intptr_t)ct_keep(address, (size_t)size);
-        }
-        ct_top = top;
-        g_ct.flow = CT_RETURN;
-        return 1;
-    }
-    if (s->kind == E_IMPORT || s->kind == E_EMIT || (running && s->kind == E_INCLUDE)) {
-        // what the body imports and includes was taken up when its function was noted
-        if (!running) FAIL(c, s->token, "'%s' is only allowed in the body of an '@' function", s->kind == E_EMIT ? "@emit" : "import");
-        if (s->kind == E_EMIT) ct_emit(c, s);
-        return 1;
-    }
-    if (running && (s->kind == E_BLOCK || s->kind == E_ALL)) {
-        for (size_t i = 0; s->kind == E_BLOCK && i < s->blockstmt_size; i++) gen_stmt(c, s->blockstmt[i], out, ind);
-        c->locals = scope;
-        ct_top = top;
-        return 1;
-    }
-    if (!control) {
-        // a statement that only works with compile-time values leaves nothing behind
-        if (!running && ct_known(c, s) != 2) return 0;
-        ct_eval(c, s);
-        ct_top = top;
-        return 1;
-    }
+    Condition* f = &s->cases[s->case_size - 1];
 
     // the first clause of a `for` may declare the compile-time variable its condition is about
     int declares = s->kind == E_FOR && f->base_case && f->base_case->kind == E_DECLGROUP && (running || ct_spec(f->base_case->type));
@@ -2641,57 +3835,85 @@ static int gen_ct_stmt(Ctx* c, Expr* s, Buf* out, int ind) {
     int runs = running || (f->condition && ct_known(c, f->condition) == 2);
     if (declares && !runs) FAIL(c, s->token, "a loop over a compile-time variable needs a condition that is a compile-time value");
 
-    int flow = 0, passes = 0;
-    if (runs && loop) {
-        if (s->kind == E_FOR && f->base_case && !declares) gen_stmt(c, f->base_case, out, ind);
-        g_ct.unrolling = g_ct.runtime;
-        g_ct.deciding = -1;
-        g_ct.in_switch = 0;
-        for (int first = 1; (first && s->kind == E_DOWHILE) || ct_holds(c, f->condition); first = 0) {
-            if (++passes > CT_PASSES) FAIL(c, s->token, "this loop is still running at compile time after %d passes", CT_PASSES);
-            gen_ct_body(c, f->block, out, ind);
-            if (g_ct.flow == CT_BREAK || g_ct.flow == CT_RETURN) break;
-            g_ct.flow = 0;
-            if (s->kind == E_FOR && f->increment) ct_value(c, f->increment);
-        }
-        flow = g_ct.flow == CT_RETURN ? CT_RETURN : 0;
-    } else if (runs && s->kind == E_SWITCH) {
-        // the statements from the matching case, or from `default`, up to a `break`
-        Expr* body = f->block;
-        if (body->kind != E_BLOCK) FAIL(c, s->token, "a switch on a compile-time value needs a body in braces");
-        Word value = ct_value(c, f->condition).v;
-        size_t count = body->blockstmt_size, start = count, otherwise = count;
-        for (size_t i = 0; i < count && start == count; i++)
-            for (Expr* label = body->blockstmt[i]; label->kind == E_CASE || label->kind == E_DEFAULT; label = label->right) {
-                if (label->kind == E_DEFAULT) otherwise = i;
-                else if ((running || ct_known(c, label->left)) && ct_value(c, label->left).v == value) start = i;
-            }
-        g_ct.deciding = g_ct.runtime;
-        for (size_t i = start == count ? otherwise : start; i < count && !g_ct.flow; i++) {
-            Expr* inner = body->blockstmt[i];
-            while (inner->kind == E_CASE || inner->kind == E_DEFAULT) inner = inner->right;
-            gen_stmt(c, inner, out, ind);
-        }
-        // a `continue` goes on to the loop around the switch, and a `return` to the call
-        flow = g_ct.flow == CT_BREAK ? 0 : g_ct.flow;
-    } else if (runs) {
-        if (ct_holds(c, f->condition)) gen_ct_body(c, f->block, out, ind);
-        else if (s->case_size == 2) gen_ct_body(c, s->cases[0].block, out, ind);
-        flow = g_ct.flow;
-    } else {
-        // Decided at runtime: compile-time variables from outside cannot change
-        // in it, and a loop or switch takes over `break` and `continue`.
-        g_ct.runtime++;
-        g_ct.floor = ct_top;
-        if (s->kind == E_SWITCH) g_ct.in_switch = 1;
-        if (loop) g_ct.unrolling = -1;
-        if (s->kind != E_IF) g_ct.deciding = -1;
-        g_ct_pass = s;
-        gen_stmt(c, s, out, ind);
-    }
+    int flow = 0;
+    if (runs && loop) flow = gen_ct_loop(c, s, f, declares, out, ind);
+    else if (runs && s->kind == E_SWITCH) flow = gen_ct_switch(c, s, f, running, out, ind);
+    else if (runs) flow = gen_ct_branch(c, s, f, out, ind);
+    else gen_ct_runtime(c, s, loop, out, ind);
     g_ct = outer;
     g_ct.flow = flow;
     c->locals = scope;
     ct_top = top;
     return 1;
+}
+
+// A loop that is run at compile time: its body once for each pass. Returns
+// what goes on out of it: a `return`, or nothing.
+static int gen_ct_loop(Ctx* c, Expr* s, Condition* f, int declares, Buf* out, int ind) {
+    int passes = 0;
+    if (s->kind == E_FOR && f->base_case && !declares) gen_stmt(c, f->base_case, out, ind);
+    g_ct.unrolling = g_ct.runtime;
+    g_ct.deciding = -1;
+    g_ct.in_switch = 0;
+    for (int first = 1; (first && s->kind == E_DOWHILE) || ct_holds(c, f->condition); first = 0) {
+        if (++passes > CT_PASSES) FAIL(c, s->token, "this loop is still running at compile time after %d passes", CT_PASSES);
+        gen_ct_body(c, f->block, out, ind);
+        if (g_ct.flow == CT_BREAK || g_ct.flow == CT_RETURN) break;
+        g_ct.flow = 0;
+        if (s->kind == E_FOR && f->increment) ct_value(c, f->increment);
+    }
+    return g_ct.flow == CT_RETURN ? CT_RETURN : 0;
+}
+
+// A switch on a compile-time value: the statements from the matching case, or
+// from `default`, up to a `break`. Returns what goes on out of it: a
+// `continue` to the loop around the switch, or a `return` to the call.
+static int gen_ct_switch(Ctx* c, Expr* s, Condition* f, int running, Buf* out, int ind) {
+    Expr* body = f->block;
+    if (body->kind != E_BLOCK) FAIL(c, s->token, "a switch on a compile-time value needs a body in braces");
+    Word value = ct_value(c, f->condition).v;
+    size_t start = ct_switch_start(c, body, value, running);
+    g_ct.deciding = g_ct.runtime;
+    for (size_t i = start; i < body->blockstmt_size && !g_ct.flow; i++) {
+        Expr* inner = body->blockstmt[i];
+        while (inner->kind == E_CASE || inner->kind == E_DEFAULT) inner = inner->right;
+        gen_stmt(c, inner, out, ind);
+    }
+    return g_ct.flow == CT_BREAK ? 0 : g_ct.flow;
+}
+
+// The statement a switch on `value` starts at: the one with the matching case
+// label, else the one with `default`, else none (the count of statements)
+static size_t ct_switch_start(Ctx* c, Expr* body, Word value, int running) {
+    size_t count = body->blockstmt_size;
+    size_t start = count;
+    size_t otherwise = count;
+    for (size_t i = 0; i < count && start == count; i++) {
+        for (Expr* label = body->blockstmt[i]; label->kind == E_CASE || label->kind == E_DEFAULT; label = label->right) {
+            if (label->kind == E_DEFAULT) otherwise = i;
+            else if ((running || ct_known(c, label->left)) && ct_value(c, label->left).v == value) start = i;
+        }
+    }
+    return start == count ? otherwise : start;
+}
+
+// An `if` on a compile-time value: the branch it takes. Returns what goes on
+// out of it.
+static int gen_ct_branch(Ctx* c, Expr* s, Condition* f, Buf* out, int ind) {
+    if (ct_holds(c, f->condition)) gen_ct_body(c, f->block, out, ind);
+    else if (s->case_size == 2) gen_ct_body(c, s->cases[0].block, out, ind);
+    return g_ct.flow;
+}
+
+// Decided at runtime: the checker generates it as always. Compile-time
+// variables from outside cannot change in it, and a loop or switch takes over
+// `break` and `continue`.
+static void gen_ct_runtime(Ctx* c, Expr* s, int loop, Buf* out, int ind) {
+    g_ct.runtime++;
+    g_ct.floor = ct_top;
+    if (s->kind == E_SWITCH) g_ct.in_switch = 1;
+    if (loop) g_ct.unrolling = -1;
+    if (s->kind != E_IF) g_ct.deciding = -1;
+    g_ct_pass = s;
+    gen_stmt(c, s, out, ind);
 }
