@@ -1,7 +1,8 @@
-.PHONY: all clean typedcc test-typedcc test-windows
+.PHONY: all clean test bench typedcc test-typedcc test-windows
 
 SRC := src/main.c $(wildcard src/*.h src/os/*.h)
 DEBUG := -Wall -Wextra -Wpedantic -fsanitize=address,undefined -g
+
 
 all: build/main
 
@@ -63,8 +64,11 @@ test-windows: build/main.exe
 build:
 	mkdir -p $@
 
-test:
+test: all
 	sh tests/run.sh
+
+bench: all
+	sh tests/bench.sh
 
 
 clean:
